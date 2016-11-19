@@ -45,7 +45,7 @@ fetchTweetThread :: Chan StreamingAPI -> IO ()
 fetchTweetThread channel = do
   mgr <- newManager tlsManagerSettings
   runResourceT $ do
-    src <- stream twInfo mgr $ statusesFilterByTrack "cat" --userstream
+    src <- stream twInfo mgr userstream
     src C.$$+- CL.mapM_ (liftIO . getStream)
 
   where
@@ -59,7 +59,9 @@ fetchTweetThread channel = do
 textWrap :: Int -> T.Text -> T.Text
 textWrap w text
   | T.length text == 0 = T.empty
-  | otherwise = let (x,xs) = T.splitAt w text in x `T.append` "\n" `T.append` textWrap w xs
+  | otherwise = let (x,xs) = T.splitAt maxWidth text in x `T.append` "\n" `T.append` textWrap w xs
+  where
+    maxWidth = maximum [n | n <- [0..T.length text], textWidth (T.take n text) < w]
 
 main = do
   channel <- newChan
