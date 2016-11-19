@@ -2,7 +2,14 @@
 module Main where
 
 import Lib
+import Credential
 import Brick
+import Brick.Util
+import Graphics.Vty (mkVty, outputForConfig)
+import Graphics.Vty.Config
+import Graphics.Vty.Output.Interface
+import Graphics.Vty.Input.Events
+import Graphics.Vty.Attributes
 import Web.Twitter.Conduit hiding (update, map, index)
 import Web.Twitter.Types.Lens hiding (Event, text)
 import qualified Data.Conduit as C
@@ -15,12 +22,8 @@ import Control.Monad.Trans.Resource
 import Control.Lens hiding (index)
 import Control.Concurrent
 import Data.IORef
-import qualified Data.Map as M
-
-modifyMVar' :: MVar a -> (a -> a) -> IO ()
-modifyMVar' ref f = modifyMVar_ ref $ return . f
-
-----
+import qualified Data.Vector as V
+import Data.Monoid
 
 data ListView = ListView {
   _items :: [StreamingAPI],
@@ -29,114 +32,113 @@ data ListView = ListView {
 
 data Client = Client {
   _listView :: ListView,
-  _previousKey :: Maybe Key,
-  _mainProcess :: IO (),
-  _shutdownProcess :: [ThreadId] -> IO (),
-  _threadIds :: [ThreadId]
+  _screenSize :: (Int,Int)
   }
 
 makeLenses ''ListView
 makeLenses ''Client
 
 defClient :: Client
-defClient = Client (ListView [] 0) Nothing (return ()) (\_ -> return ()) []
+defClient = Client (ListView [] 0) (0,0)
 
-fetchTweetThread :: MVar Client -> IO ()
-fetchTweetThread ref = do
+fetchTweetThread :: Chan StreamingAPI -> IO ()
+fetchTweetThread channel = do
   mgr <- newManager tlsManagerSettings
-  t2 <- myThreadId
-  modifyMVar' ref $ threadIds %~ (t2 :)
-
   runResourceT $ do
-    src <- stream twInfo mgr userstream
+    src <- stream twInfo mgr $ statusesFilterByTrack "cat" --userstream
     src C.$$+- CL.mapM_ (liftIO . getStream)
 
   where
     getStream :: StreamingAPI -> IO ()
     getStream t = do
       case t of
-        z@(SStatus tw) -> do
-          modifyMVar' ref $ listView . items %~ (z :)
-        z@(SRetweetedStatus tw) -> do
-          modifyMVar' ref $ listView . items %~ (z :)
+        z@(SStatus tw) -> writeChan channel z
+        z@(SRetweetedStatus tw) -> writeChan channel z
         _ -> return ()
 
-      client <- readMVar ref
-      client ^. mainProcess
-
-fetchKeyEventThread :: Vty -> MVar Client -> IO ()
-fetchKeyEventThread vty ref = do
-  e <- nextEvent vty
-  case e of
-    (EvKey key _) -> do
-      modifyMVar' ref $ previousKey .~ Just key
-
-      client <- readMVar ref
-      client ^. mainProcess
-    _ -> return ()
-
-  fetchKeyEventThread vty ref
+textWrap :: Int -> T.Text -> T.Text
+textWrap w text
+  | T.length text == 0 = T.empty
+  | otherwise = let (x,xs) = T.splitAt w text in x `T.append` "\n" `T.append` textWrap w xs
 
 main = do
-  cfg <- standardIOConfig
-  vty <- mkVty cfg
-  ref <- newMVar $ defClient
-  showCursor $ outputIface vty
+  channel <- newChan
+  forkIO $ fetchTweetThread channel
 
-  modifyMVar' ref $ mainProcess .~ mainloop vty ref
-  modifyMVar' ref $ shutdownProcess .~ \tids -> do
-    shutdown vty
-    mapM_ killThread tids
-  
-  t1 <- forkIO $ fetchKeyEventThread vty ref
-  modifyMVar' ref $ threadIds .~ [t1]
-  fetchTweetThread ref
+  size <- displayBounds =<< outputForConfig =<< standardIOConfig
 
-mainloop :: Vty -> MVar Client -> IO ()
-mainloop vty ref = do
-  listViewScroll
-
-  (regionW, regionH) <- displayBounds =<< outputForConfig =<< standardIOConfig
-  listImg <- getListImg
-
-  let minibuffer = translateY (regionH-2) $
-        charFill (defAttr `withBackColor` brightWhite) ' ' regionW 1
-        <-> string defAttr ">"
-
-  update vty (addToBottom listImg minibuffer)
-
-  threadDelay 10
-  checkQuit
+  customMain
+    (standardIOConfig >>= mkVty)
+    (Just channel)
+    app
+    (defClient & screenSize .~ size)
 
   where
-    checkQuit = do
-      client <- readMVar ref
-      when (client ^. previousKey == Just (KChar 'q')) $
-        client ^. shutdownProcess $ client ^. threadIds
-    
-    listViewMaxItems = 10
-    
-    listViewScroll = do
-      client <- readMVar ref
-      
-      case client ^. previousKey of
-        Just (KChar 'j') | (client ^. listView ^. index + listViewMaxItems < length (client ^. listView ^. items)) -> modifyMVar' ref $ listView . index +~ 1
-        Just (KChar 'k') | (client ^. listView ^. index > 0) -> modifyMVar' ref $ listView . index -~ 1
-        _ -> return ()
+    app :: App Client StreamingAPI String
+    app = App widgets cursor eventHandler return def
 
-    getListImg = do
-      client <- readMVar ref
-      let currentItms = drop (client^.listView^.index) $ take (client ^. listView ^. index + listViewMaxItems) $ client ^. listView . items
-      return $ picForImage $ vertCat $ fmap statusImg currentItms
+    transparent = Attr KeepCurrent KeepCurrent KeepCurrent
+    fore = withForeColor
+    back = withBackColor
+    style = withStyle
+    resetStyle (Attr _ x y) = Attr Default x y
 
-    statusImg (SStatus tw) = do
-      string defAttr (T.unpack $ tw ^. statusUser ^. userName)
-        <|> string defAttr " @"
-        <|> string defAttr (T.unpack $ tw ^. statusUser ^. userScreenName)
-      <-> string defAttr (" " ++ (T.unpack $ tw ^. statusText))
-      <-> string defAttr "\n\n"
-    statusImg (SRetweetedStatus tw) =
-      string defAttr (T.unpack $ tw ^. rsUser ^. userScreenName)
-        <|> string defAttr " RT "
-        <|> statusImg (SStatus $ tw ^. rsRetweetedStatus)
+    onAttr :: Attr -> Widget n -> Widget n
+    onAttr tt = withAttr uid . updateAttrMap (applyAttrMappings [(uid, tt)])
+      where uid = attrName "unique-attr-id"
+
+    cursor client xs = Just $ CursorLocation (Location (0,0)) Nothing
+
+    eventHandler client ev =
+      let i = client ^. listView ^. index;
+          ts = client ^. listView ^. items in
+      case ev of
+        VtyEvent (EvKey (KChar 'q') _) -> halt client
+        VtyEvent (EvKey (KChar 'j') _) | i - 1 < length ts -> continue $ client & listView . index +~ 1
+        VtyEvent (EvKey (KChar 'k') _) | i > 0 -> continue $ client & listView . index -~ 1
+        VtyEvent (EvKey (KChar '<') _) -> continue $ client & listView . index .~ 0
+        AppEvent tw -> continue $ client
+          & listView . items %~ (tw :)
+          & listView . index %~ (\i -> if i == 0 then 0 else i + 1)
+        _ -> continue client
+
+    widgets client = [tweetList, minibuffer]
+      where
+        tweetList =
+          let (w,h) = client ^. screenSize in
+          cropBottomBy 2 $ vBox $ fmap (\(i,st) -> renderTweet (i == 0) st) $ zip [0..] $ drop (client ^. listView ^. index) $ client ^. listView ^. items
+
+        renderTweet :: Bool -> StreamingAPI -> Widget String
+        renderTweet = go where
+          scrName sn =
+            onAttr (resetStyle transparent) $ (onAttr (transparent `fore` red `style` underline) $ txt "@" <+> txt sn) <+> txt " "
+          dspName n = txt n
+          name user =
+            scrName (user ^. userScreenName)
+            <+> txt "(" <+> dspName (user ^. userName) <+> txt ")"
+          nameRT rtw =
+            name (rtw ^. rsUser)
+            <+> txt " RT "
+            <+> name (rtw ^. rsRetweetedStatus ^. statusUser)
+          tweetContent = textWrap (client ^. screenSize ^. _1 - 3)
+
+          -- screenNameだけが反転しない
+          -- 真面目にattrMap使わないとだめ？
+          inverted =
+            onAttr (transparent `fore` black `back` brightWhite) . padRight Max
+
+          go b (SStatus tw) = padLeft (Pad 1) $
+            (name $ tw ^. statusUser)
+            <=> (txt " " <+> txt (tweetContent $ tw ^. statusText))
+            <=> txt " "
+          go b (SRetweetedStatus rtw) = padLeft (Pad 1) $
+            (nameRT rtw)
+            <=> (txt " " <+> txt (tweetContent $ rtw ^. rsRetweetedStatus ^. statusText))
+            <=> txt " "
+
+        minibuffer =
+          let (w,h) = client ^. screenSize in
+          translateBy (Location $ (0,h-2)) $ vBox [
+            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home")),
+            txt "(j)Next (k)Previous (<)Goto topmost"]
 
