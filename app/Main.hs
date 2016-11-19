@@ -96,6 +96,9 @@ main = do
           ts = client ^. listView ^. items in
       case ev of
         VtyEvent (EvKey (KChar 'q') _) -> halt client
+
+        -- j,k移動はindexが端点の時はカーソルだけ動かす感じにしたい
+        -- ページをまたぐときは上端と下端で固定する案
         VtyEvent (EvKey (KChar 'j') _) | i - 1 < length ts -> continue $ client & listView . index +~ 1
         VtyEvent (EvKey (KChar 'k') _) | i > 0 -> continue $ client & listView . index -~ 1
         VtyEvent (EvKey (KChar '<') _) -> continue $ client & listView . index .~ 0
@@ -119,9 +122,10 @@ main = do
             scrName (user ^. userScreenName)
             <+> txt "(" <+> dspName (user ^. userName) <+> txt ")"
           nameRT rtw =
-            name (rtw ^. rsUser)
-            <+> txt " RT "
+            txt "RT "
             <+> name (rtw ^. rsRetweetedStatus ^. statusUser)
+            <+> txt " by "
+            <+> name (rtw ^. rsUser)
           tweetContent = textWrap (client ^. screenSize ^. _1 - 3)
 
           -- screenNameだけが反転しない
