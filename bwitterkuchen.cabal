@@ -35,6 +35,7 @@ executable bwitterkuchen-exe
                      , resourcet
                      , containers
                      , vector
+                     , text-zipper
   default-language:    Haskell2010
 
 test-suite bwitterkuchen-test
