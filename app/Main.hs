@@ -147,8 +147,8 @@ main = do
     editKeyHandler request client ev =
       case ev of
         VtyEvent (EvKey (KChar ch) []) -> continue $ client & tweetbox . editContentsL %~ insertChar ch
-        VtyEvent (EvKey (KChar 'q') ms) | MCtrl `elem` ms -> continue $ client & clientMode .~ TLView
-        VtyEvent (EvKey (KChar 'c') ms) | MCtrl `elem` ms -> do
+        VtyEvent (EvKey (KChar 'q') [MCtrl]) -> continue $ client & clientMode .~ TLView
+        VtyEvent (EvKey (KChar 'c') [MCtrl]) -> do
           let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ getEditContents $ client ^. tweetbox
           case client ^. clientMode of
             Tweet -> liftIO $ request $ update text
@@ -176,7 +176,7 @@ main = do
             TStatusReply tw b tws -> TStatusReply tw (not b) tws
             z -> z
         VtyEvent (EvKey (KChar 't') []) -> continue $ client & clientMode .~ Tweet
-        VtyEvent (EvKey (KChar 'r') []) -> do
+        VtyEvent (EvKey (KChar 't') [MCtrl]) -> do
           let tw = (client ^. listView ^. items) !! (client ^. listView ^. index)
           continue $ client
             & tweetbox . editContentsL .~ textZipper ["@" `T.append` (tw ^. ofStatus ^. user ^. userScreenName)] Nothing
@@ -238,6 +238,6 @@ main = do
         minibuffer =
           let (w,h) = client ^. screenSize in
           translateBy (Location $ (0,h-2)) $ vBox [
-            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (r)eply")),
+            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (C-t)reply")),
             txt " "]
 
