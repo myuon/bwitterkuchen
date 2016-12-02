@@ -12,7 +12,8 @@ import Graphics.Vty.Config
 import Graphics.Vty.Output.Interface
 import Graphics.Vty.Input.Events
 import Graphics.Vty.Attributes
-import Web.Twitter.Conduit hiding (map, index)
+import Web.Twitter.Conduit hiding (map, index, inReplyToStatusId)
+import Web.Twitter.Conduit.Parameters
 import Web.Twitter.Types.Lens hiding (Event, text)
 import qualified Data.Conduit as C
 import qualified Data.Conduit.List as CL
@@ -38,6 +39,18 @@ data Timeline =
   | TStatusQT Status
   deriving (Eq, Show)
 
+ofStatus :: Lens' Timeline Status
+ofStatus = lens get set where
+  get (TStatus s) = s
+  get (TStatusRT rs) = rs ^. rsRetweetedStatus
+  get (TStatusReply r _ _) = r
+  get (TStatusQT s) = s
+
+  set (TStatus _) s = TStatus s
+  set (TStatusRT rs) s = TStatusRT $ rs & rsRetweetedStatus .~ s
+  set (TStatusReply _ u rs) s = TStatusReply s u rs
+  set (TStatusQT _) s = TStatusQT s
+
 getStatusReplies :: Status -> (StatusId -> IO Status) -> IO Timeline
 getStatusReplies status getter = TStatusReply status False <$> go status
   where
@@ -47,8 +60,7 @@ getStatusReplies status getter = TStatusReply status False <$> go status
         Just i -> getter i >>= \s' -> (s':) <$> go s'
         Nothing -> return []
 
-data ClientMode = TLView | Tweet
-  deriving (Eq, Show)
+data ClientMode = TLView | Tweet | Reply StatusId
 
 data ListView = ListView {
   _items :: [Timeline],
@@ -95,7 +107,7 @@ textWrap w text
 
 main = do
   mgr <- newManager tlsManagerSettings
-  let request = call twInfo mgr . update :: T.Text -> IO Status
+  let request = call twInfo mgr
   
   channel <- newChan
   forkIO $ fetchTweetThread channel
@@ -109,7 +121,7 @@ main = do
     (defClient & screenSize .~ size)
 
   where
-    app :: (T.Text -> IO r) -> App Client Timeline String
+    app :: (APIRequest StatusesUpdate Status -> IO Status) -> App Client Timeline String
     app request = App widgets cursor (eventHandler request) return def
 
     transparent = Attr KeepCurrent KeepCurrent KeepCurrent
@@ -125,18 +137,26 @@ main = do
     cursor client xs = case client ^. clientMode of
       TLView -> Just $ CursorLocation (Location (0,0)) Nothing
       Tweet -> Just $ head xs
+      Reply _ -> Just $ head xs
 
     eventHandler request client ev = case client ^. clientMode of
       TLView -> tlviewHandler client ev
       Tweet -> editKeyHandler request client ev
+      Reply _ -> editKeyHandler request client ev
 
     editKeyHandler request client ev =
       case ev of
         VtyEvent (EvKey (KChar ch) []) -> continue $ client & tweetbox . editContentsL %~ insertChar ch
         VtyEvent (EvKey (KChar 'q') ms) | MCtrl `elem` ms -> continue $ client & clientMode .~ TLView
         VtyEvent (EvKey (KChar 'c') ms) | MCtrl `elem` ms -> do
-          liftIO $ request $ foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ getEditContents $ client ^. tweetbox
-          continue $ client & tweetbox . editContentsL .~ textZipper [] Nothing
+          let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ getEditContents $ client ^. tweetbox
+          case client ^. clientMode of
+            Tweet -> liftIO $ request $ update text
+            Reply id -> liftIO $ request $ update text & inReplyToStatusId ?~ id
+
+          continue $ client
+            & tweetbox . editContentsL .~ textZipper [] Nothing
+            & clientMode .~ TLView
         VtyEvent event -> handleEventLensed client tweetbox handleEditorEvent event >>= continue
         _ -> continue client
 
@@ -144,18 +164,23 @@ main = do
       let i = client ^. listView ^. index;
           ts = client ^. listView ^. items in
       case ev of
-        VtyEvent (EvKey (KChar 'q') _) -> halt client
+        VtyEvent (EvKey (KChar 'q') []) -> halt client
 
         -- j,k移動はindexが端点の時はカーソルだけ動かす感じにしたい
         -- ページをまたぐときは上端と下端で固定する案
-        VtyEvent (EvKey (KChar 'j') _) | i - 1 < length ts -> continue $ client & listView . index +~ 1
-        VtyEvent (EvKey (KChar 'k') _) | i > 0 -> continue $ client & listView . index -~ 1
-        VtyEvent (EvKey (KChar '<') _) -> continue $ client & listView . index .~ 0
-        VtyEvent (EvKey (KChar 'r') _) -> continue $ client & listView . items . ix i %~ \t ->
+        VtyEvent (EvKey (KChar 'j') []) | i - 1 < length ts -> continue $ client & listView . index +~ 1
+        VtyEvent (EvKey (KChar 'k') []) | i > 0 -> continue $ client & listView . index -~ 1
+        VtyEvent (EvKey (KChar '<') []) -> continue $ client & listView . index .~ 0
+        VtyEvent (EvKey (KChar 'u') []) -> continue $ client & listView . items . ix i %~ \t ->
           case t of
             TStatusReply tw b tws -> TStatusReply tw (not b) tws
             z -> z
-        VtyEvent (EvKey (KChar 't') _) -> continue $ client & clientMode .~ Tweet
+        VtyEvent (EvKey (KChar 't') []) -> continue $ client & clientMode .~ Tweet
+        VtyEvent (EvKey (KChar 'r') []) -> do
+          let tw = (client ^. listView ^. items) !! (client ^. listView ^. index)
+          continue $ client
+            & tweetbox . editContentsL .~ textZipper ["@" `T.append` (tw ^. ofStatus ^. user ^. userScreenName)] Nothing
+            & clientMode .~ Reply (tw ^. ofStatus ^. statusId)
         AppEvent tw -> continue $ client
           & listView . items %~ (tw :)
           & listView . index %~ (\i -> if i == 0 then 0 else i + 1)
@@ -163,12 +188,15 @@ main = do
 
     widgets client = case client ^. clientMode of
       TLView -> [tweetList, minibuffer]
-      Tweet -> [tweetList, tweetEditBox, minibuffer]
+      Tweet -> tweetBoxLayout
+      Reply _ -> tweetBoxLayout
       where
+        tweetBoxLayout = [vLimit (client ^. screenSize ^. _2 - 6) tweetList, tweetEditBox, minibuffer]
+        
         tweetEditBox =
           let (w,h) = client ^. screenSize in
           translateBy (Location (0, h-8)) $ vLimit 6 $ vBox [
-            onAttr (transparent `back` brightWhite `fore` black) $ padRight Max $ txt ":tweetbox (C-c)update (C-q)quit",
+            onAttr (transparent `back` brightWhite `fore` black) $ padRight Max $ txt ":tweetbox -- (C-c)send (C-q)quit",
             renderEditor True $ client ^. tweetbox]
         
         tweetList =
@@ -210,6 +238,6 @@ main = do
         minibuffer =
           let (w,h) = client ^. screenSize in
           translateBy (Location $ (0,h-2)) $ vBox [
-            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home")),
-            txt "(q)uit (j)Next (k)Previous (<)Goto Top (r)eply (t)weet"]
+            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (r)eply")),
+            txt " "]
 
