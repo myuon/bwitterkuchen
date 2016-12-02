@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams #-}
 module Main where
 
 import Lib
@@ -107,7 +107,8 @@ textWrap w text
 
 main = do
   mgr <- newManager tlsManagerSettings
-  let request = call twInfo mgr
+  let ?twInfo = twInfo
+  let ?mgr = mgr
   
   channel <- newChan
   forkIO $ fetchTweetThread channel
@@ -117,12 +118,12 @@ main = do
   customMain
     (standardIOConfig >>= mkVty)
     (Just channel)
-    (app request)
+    app
     (defClient & screenSize .~ size)
 
   where
-    app :: (APIRequest StatusesUpdate Status -> IO Status) -> App Client Timeline String
-    app request = App widgets cursor (eventHandler request) return def
+    app :: (?mgr :: Manager, ?twInfo :: TWInfo) => App Client Timeline String
+    app = App widgets cursor eventHandler return def
 
     transparent = Attr KeepCurrent KeepCurrent KeepCurrent
     fore = withForeColor
@@ -139,20 +140,20 @@ main = do
       Tweet -> Just $ head xs
       Reply _ -> Just $ head xs
 
-    eventHandler request client ev = case client ^. clientMode of
+    eventHandler client ev = case client ^. clientMode of
       TLView -> tlviewHandler client ev
-      Tweet -> editKeyHandler request client ev
-      Reply _ -> editKeyHandler request client ev
+      Tweet -> editKeyHandler client ev
+      Reply _ -> editKeyHandler client ev
 
-    editKeyHandler request client ev =
+    editKeyHandler client ev =
       case ev of
         VtyEvent (EvKey (KChar ch) []) -> continue $ client & tweetbox . editContentsL %~ insertChar ch
         VtyEvent (EvKey (KChar 'q') [MCtrl]) -> continue $ client & clientMode .~ TLView
         VtyEvent (EvKey (KChar 'c') [MCtrl]) -> do
           let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ getEditContents $ client ^. tweetbox
           case client ^. clientMode of
-            Tweet -> liftIO $ request $ update text
-            Reply id -> liftIO $ request $ update text & inReplyToStatusId ?~ id
+            Tweet -> liftIO $ call ?twInfo ?mgr $ update text
+            Reply id -> liftIO $ call ?twInfo ?mgr $ update text & inReplyToStatusId ?~ id
 
           continue $ client
             & tweetbox . editContentsL .~ textZipper [] Nothing
@@ -181,6 +182,11 @@ main = do
           continue $ client
             & tweetbox . editContentsL .~ textZipper ["@" `T.append` (tw ^. ofStatus ^. user ^. userScreenName)] Nothing
             & clientMode .~ Reply (tw ^. ofStatus ^. statusId)
+        VtyEvent (EvKey (KChar 'f') []) -> do
+          let tw = (client ^. listView ^. items) !! (client ^. listView ^. index)
+          liftIO $ call ?twInfo ?mgr $ favoritesCreate $ tw ^. ofStatus ^. statusId
+          continue $ client
+            & listView . items . ix (client ^. listView ^. index) . ofStatus . statusFavorited .~ Just True
         AppEvent tw -> continue $ client
           & listView . items %~ (tw :)
           & listView . index %~ (\i -> if i == 0 then 0 else i + 1)
@@ -210,25 +216,29 @@ main = do
           name user =
             scrName (user ^. userScreenName)
             <+> txt "(" <+> dspName (user ^. userName) <+> txt ")"
+
           nameRT rtw =
             txt "RT "
             <+> name (rtw ^. rsRetweetedStatus ^. statusUser)
             <+> txt " by "
             <+> name (rtw ^. rsUser)
-          tweetContent = textWrap (client ^. screenSize ^. _1 - 3)
-
+          tweetContent text =
+            txt (textWrap (client ^. screenSize ^. _1 - 3) text)
+          favRT tw =
+            if tw ^. statusFavorited == Just True then txt " ★" else txt ""
+            
           -- screenNameだけが反転しない
           -- 真面目にattrMap使わないとだめ？
           inverted =
             onAttr (transparent `fore` black `back` brightWhite) . padRight Max
 
           go b (TStatus tw) = padLeft (Pad 1) $
-            (name $ tw ^. statusUser)
-            <=> (txt " " <+> txt (tweetContent $ tw ^. statusText))
+            (name $ tw ^. statusUser) <+> favRT tw
+            <=> (txt " " <+> (tweetContent $ tw ^. statusText))
             <=> txt " "
           go b (TStatusRT rtw) = padLeft (Pad 1) $
-            (nameRT rtw)
-            <=> (txt " " <+> txt (tweetContent $ rtw ^. rsRetweetedStatus ^. statusText))
+            (nameRT rtw) <+> favRT (rtw ^. rsRetweetedStatus)
+            <=> (txt " " <+> (tweetContent $ rtw ^. rsRetweetedStatus ^. statusText))
             <=> txt " "
           go b (TStatusReply tw unf tws) =
             if unf
@@ -238,6 +248,6 @@ main = do
         minibuffer =
           let (w,h) = client ^. screenSize in
           translateBy (Location $ (0,h-2)) $ vBox [
-            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (C-t)reply")),
+            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (C-t)reply (f)avorite")),
             txt " "]
 
