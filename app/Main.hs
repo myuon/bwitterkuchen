@@ -26,6 +26,7 @@ import Control.Lens hiding (index)
 import Control.Concurrent
 import Data.IORef
 import qualified Data.Vector as V
+import qualified Data.Map as M
 import Data.Monoid
 import Data.Text.Zipper (insertChar, textZipper)
 
@@ -37,6 +38,7 @@ data Timeline =
       unfolded :: Bool,
       replyTo :: [Status]}
   | TStatusQT Status
+  | TFavorite User Status
   deriving (Eq, Show)
 
 ofStatus :: Lens' Timeline Status
@@ -61,6 +63,12 @@ getStatusReplies status getter = TStatusReply status False <$> go status
         Nothing -> return []
 
 data ClientMode = TLView | Tweet | Reply StatusId
+  deriving (Eq, Ord, Show)
+
+data Tab =
+  Home { _clientMode :: ClientMode }
+  | Notification
+  deriving (Eq, Ord, Show)
 
 data ListView = ListView {
   _items :: [Timeline],
@@ -68,17 +76,29 @@ data ListView = ListView {
   }
 
 data Client = Client {
-  _listView :: ListView,
   _screenSize :: (Int,Int),
   _tweetbox :: Editor T.Text String,
-  _clientMode :: ClientMode
+  _currentTab :: Tab,
+  _tweetLists :: M.Map Tab ListView
   }
 
 makeLenses ''ListView
 makeLenses ''Client
+makePrisms ''Tab
+
+currentTweetList :: Lens' Client ListView
+currentTweetList = lens (\c -> (c ^. tweetLists) ^?! ix (tabName $ c ^. currentTab)) (\c v -> c & tweetLists . ix (tabName $ c ^. currentTab) .~ v)
+  where
+    tabName :: Tab -> Tab
+    tabName (Home _) = Home TLView
+    tabName Notification = Notification
 
 defClient :: Client
-defClient = Client (ListView [] 0) (0,0) (editorText "tweetbox" (vBox . fmap txt) (Just 5) "") TLView
+defClient = Client
+  (0,0)
+  (editorText "tweetbox" (vBox . fmap txt) (Just 5) "")
+  (Home TLView)
+  (M.fromList [(tab, ListView [] 0) | tab <- [Home TLView, Notification]])
 
 fetchTweetThread :: Chan Timeline -> IO ()
 fetchTweetThread channel = do
@@ -96,6 +116,11 @@ fetchTweetThread channel = do
             Just sid -> writeChan channel =<< getStatusReplies tw (call twInfo mgr . showId)
             Nothing -> writeChan channel $ TStatus tw
         SRetweetedStatus tw -> writeChan channel $ TStatusRT tw
+        SEvent ev | ev ^. evEvent == "favorite" ->
+          case (ev ^. evSource, ev ^. evTarget, ev ^. evTargetObject) of
+            (ETUser u, _, Just (ETStatus s)) ->
+              writeChan channel $ TFavorite u s
+            _ -> return ()
         _ -> return ()
 
 textWrap :: Int -> T.Text -> T.Text
@@ -135,69 +160,95 @@ main = do
     onAttr tt = withAttr uid . updateAttrMap (applyAttrMappings [(uid, tt)])
       where uid = attrName "unique-attr-id"
 
-    cursor client xs = case client ^. clientMode of
-      TLView -> Just $ CursorLocation (Location (0,0)) Nothing
-      Tweet -> Just $ head xs
-      Reply _ -> Just $ head xs
+    cursor client xs = cursorTab $ client ^. currentTab where
+      cursorTab (Home v) = case v of
+        TLView -> Just $ CursorLocation (Location (0,0)) Nothing
+        Tweet -> Just $ head xs
+        Reply _ -> Just $ head xs
+      cursorTab Notification = Just $ CursorLocation (Location (0,0)) Nothing
 
-    eventHandler client ev = case client ^. clientMode of
-      TLView -> tlviewHandler client ev
-      Tweet -> editKeyHandler client ev
-      Reply _ -> editKeyHandler client ev
+    eventHandler client ev = case client ^. currentTab of
+      Home TLView -> tlviewHandler client ev
+      Home Tweet -> editKeyHandler client ev
+      Home (Reply _) -> editKeyHandler client ev
+      Notification -> tlviewHandler client ev
 
     editKeyHandler client ev =
       case ev of
         VtyEvent (EvKey (KChar ch) []) -> continue $ client & tweetbox . editContentsL %~ insertChar ch
-        VtyEvent (EvKey (KChar 'q') [MCtrl]) -> continue $ client & clientMode .~ TLView
+        VtyEvent (EvKey (KChar 'q') [MCtrl]) -> continue $ client & currentTab . _Home .~ TLView
         VtyEvent (EvKey (KChar 'c') [MCtrl]) -> do
           let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ getEditContents $ client ^. tweetbox
-          case client ^. clientMode of
-            Tweet -> liftIO $ call ?twInfo ?mgr $ update text
-            Reply id -> liftIO $ call ?twInfo ?mgr $ update text & inReplyToStatusId ?~ id
+          case client ^. currentTab of
+            Home Tweet -> liftIO $ call ?twInfo ?mgr $ update text
+            Home (Reply id) -> liftIO $ call ?twInfo ?mgr $ update text & inReplyToStatusId ?~ id
 
           continue $ client
             & tweetbox . editContentsL .~ textZipper [] Nothing
-            & clientMode .~ TLView
+            & currentTab . _Home .~ TLView
         VtyEvent event -> handleEventLensed client tweetbox handleEditorEvent event >>= continue
         _ -> continue client
 
+    -- Home, Notification共通
+    -- Home限定の話を持ち込むときは注意
     tlviewHandler client ev =
-      let i = client ^. listView ^. index;
-          ts = client ^. listView ^. items in
+      let i = client ^. currentTweetList ^. index
+          ts = client ^. currentTweetList ^. items
+
+          isHome = client ^. currentTab /= Notification
+          isNotification = client ^. currentTab == Notification
+          viewIsNonEmpty = length (client ^. currentTweetList ^. items) > 0
+      in
       case ev of
         VtyEvent (EvKey (KChar 'q') []) -> halt client
 
         -- j,k移動はindexが端点の時はカーソルだけ動かす感じにしたい
         -- ページをまたぐときは上端と下端で固定する案
-        VtyEvent (EvKey (KChar 'j') []) | i - 1 < length ts -> continue $ client & listView . index +~ 1
-        VtyEvent (EvKey (KChar 'k') []) | i > 0 -> continue $ client & listView . index -~ 1
-        VtyEvent (EvKey (KChar '<') []) -> continue $ client & listView . index .~ 0
-        VtyEvent (EvKey (KChar 'u') []) -> continue $ client & listView . items . ix i %~ \t ->
+        VtyEvent (EvKey (KChar 'j') []) | i - 1 < length ts -> continue $ client & currentTweetList . index +~ 1
+        VtyEvent (EvKey (KChar 'k') []) | i > 0 -> continue $ client & currentTweetList . index -~ 1
+        VtyEvent (EvKey (KChar '<') []) -> continue $ client & currentTweetList . index .~ 0
+        VtyEvent (EvKey (KChar 'u') []) | viewIsNonEmpty -> continue $ client & currentTweetList . items . ix i %~ \t ->
           case t of
             TStatusReply tw b tws -> TStatusReply tw (not b) tws
             z -> z
-        VtyEvent (EvKey (KChar 't') []) -> continue $ client & clientMode .~ Tweet
-        VtyEvent (EvKey (KChar 't') [MCtrl]) -> do
-          let tw = (client ^. listView ^. items) !! (client ^. listView ^. index)
+
+        -- tab間移動
+        -- いずれリスト選択式にしたい
+        VtyEvent (EvKey (KChar 'n') [MCtrl]) ->
+          case client ^. currentTab of
+            Home _ -> continue $ client & currentTab .~ Notification
+            Notification -> continue $ client & currentTab .~ Home TLView
+
+        -- Home Tabでのキーバインド
+        VtyEvent (EvKey (KChar 't') []) | isHome -> continue $ client & currentTab . _Home .~ Tweet
+        VtyEvent (EvKey (KChar 't') [MCtrl]) | isHome -> do
+          let tw = (client ^. currentTweetList ^. items) !! (client ^. currentTweetList ^. index)
           continue $ client
             & tweetbox . editContentsL .~ textZipper ["@" `T.append` (tw ^. ofStatus ^. user ^. userScreenName)] Nothing
-            & clientMode .~ Reply (tw ^. ofStatus ^. statusId)
-        VtyEvent (EvKey (KChar 'f') []) -> do
-          let tw = (client ^. listView ^. items) !! (client ^. listView ^. index)
+            & currentTab . _Home .~ Reply (tw ^. ofStatus ^. statusId)
+        VtyEvent (EvKey (KChar 'f') []) | isHome && viewIsNonEmpty -> do
+          let tw = (client ^. currentTweetList ^. items) !! (client ^. currentTweetList ^. index)
           liftIO $ call ?twInfo ?mgr $ favoritesCreate $ tw ^. ofStatus ^. statusId
           continue $ client
-            & listView . items . ix (client ^. listView ^. index) . ofStatus . statusFavorited .~ Just True
-        AppEvent tw -> continue $ client
-          & listView . items %~ (tw :)
-          & listView . index %~ (\i -> if i == 0 then 0 else i + 1)
+            & currentTweetList . items . ix (client ^. currentTweetList ^. index) . ofStatus . statusFavorited .~ Just True
+        AppEvent tw ->
+          let consTweet tab =
+                continue $ client
+                & tweetLists . ix tab . items %~ (tw :)
+                & tweetLists . ix tab . index %~ (\i -> if i == 0 then 0 else i + 1)
+          in
+          case tw of
+            (TFavorite _ _) -> consTweet Notification
+            _ -> consTweet (Home TLView)
         _ -> continue client
 
-    widgets client = case client ^. clientMode of
-      TLView -> [tweetList, minibuffer]
-      Tweet -> tweetBoxLayout
-      Reply _ -> tweetBoxLayout
+    widgets client = case client ^. currentTab of
+      Home TLView -> [tweetList, minibuffer (Home TLView)]
+      Home Tweet -> tweetBoxLayout
+      Home (Reply _) -> tweetBoxLayout
+      Notification -> [tweetList, minibuffer Notification]
       where
-        tweetBoxLayout = [vLimit (client ^. screenSize ^. _2 - 6) tweetList, tweetEditBox, minibuffer]
+        tweetBoxLayout = [vLimit (client ^. screenSize ^. _2 - 6) tweetList, tweetEditBox, minibuffer (Home TLView)]
         
         tweetEditBox =
           let (w,h) = client ^. screenSize in
@@ -207,7 +258,7 @@ main = do
         
         tweetList =
           let (w,h) = client ^. screenSize in
-          cropBottomBy 2 $ vBox $ fmap (\(i,st) -> renderTweet (i == 0) st) $ zip [0..] $ drop (client ^. listView ^. index) $ client ^. listView ^. items
+          cropBottomBy 2 $ vBox $ fmap (\(i,st) -> renderTweet (i == 0) st) $ zip [0..] $ drop (client ^. currentTweetList ^. index) $ client ^. currentTweetList ^. items
 
         renderTweet = go where
           scrName sn =
@@ -244,10 +295,18 @@ main = do
             if unf
             then vBox $ fmap (\(i,t) -> padLeft (Pad i) $ go (i == 0) $ TStatus t) $ zip [0..] $ tw:tws
             else go b (TStatus tw)
+          go b (TFavorite suser tw) =
+            txt "favorited by: " <+> (name suser)
+            <=> (txt " " <+> tweetContent (tw ^. statusText))
 
-        minibuffer =
+        minibuffer (Home _) =
           let (w,h) = client ^. screenSize in
           translateBy (Location $ (0,h-2)) $ vBox [
-            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (C-t)reply (f)avorite")),
+            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":home -- (q)uit (u)nfold (t)weet (C-t)reply (f)avorite (C-n)next tab")),
+            txt " "]
+        minibuffer Notification =
+          let (w,h) = client ^. screenSize in
+          translateBy (Location $ (0,h-2)) $ vBox [
+            onAttr (transparent `back` brightWhite `fore` black) (padRight Max (txt ":notification -- (C-n)next tab")),
             txt " "]
 
