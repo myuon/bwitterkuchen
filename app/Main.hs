@@ -69,6 +69,13 @@ data Tab =
   Home { _clientMode :: ClientMode }
   | Notification
   deriving (Eq, Ord, Show)
+data TabName = HomeTab | NotificationTab
+  deriving (Eq, Ord, Show)
+
+tabName :: Getter Tab TabName
+tabName = to toTabName where
+  toTabName (Home _) = HomeTab
+  toTabName Notification = NotificationTab
 
 data ListView = ListView {
   _items :: [Timeline],
@@ -79,26 +86,25 @@ data Client = Client {
   _screenSize :: (Int,Int),
   _tweetbox :: Editor T.Text String,
   _currentTab :: Tab,
-  _tweetLists :: M.Map Tab ListView
+  _tweetLists :: M.Map TabName ListView
   }
 
 makeLenses ''ListView
 makeLenses ''Client
 makePrisms ''Tab
 
+currentTabName :: Getter Client TabName
+currentTabName = currentTab . tabName
+
 currentTweetList :: Lens' Client ListView
-currentTweetList = lens (\c -> (c ^. tweetLists) ^?! ix (tabName $ c ^. currentTab)) (\c v -> c & tweetLists . ix (tabName $ c ^. currentTab) .~ v)
-  where
-    tabName :: Tab -> Tab
-    tabName (Home _) = Home TLView
-    tabName Notification = Notification
+currentTweetList = lens (\c -> (c ^. tweetLists) ^?! ix (c ^. currentTabName)) (\c v -> c & tweetLists . ix (c ^. currentTabName) .~ v)
 
 defClient :: Client
 defClient = Client
   (0,0)
   (editorText "tweetbox" (vBox . fmap txt) (Just 5) "")
   (Home TLView)
-  (M.fromList [(tab, ListView [] 0) | tab <- [Home TLView, Notification]])
+  (M.fromList [(tab, ListView [] 0) | tab <- [HomeTab, NotificationTab]])
 
 fetchTweetThread :: Chan Timeline -> IO ()
 fetchTweetThread channel = do
@@ -238,8 +244,8 @@ main = do
                 & tweetLists . ix tab . index %~ (\i -> if i == 0 then 0 else i + 1)
           in
           case tw of
-            (TFavorite _ _) -> consTweet Notification
-            _ -> consTweet (Home TLView)
+            (TFavorite _ _) -> consTweet NotificationTab
+            _ -> consTweet HomeTab
         _ -> continue client
 
     widgets client = case client ^. currentTab of
