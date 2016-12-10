@@ -86,7 +86,8 @@ data Client = Client {
   _screenSize :: (Int,Int),
   _tweetbox :: Editor T.Text String,
   _currentTab :: Tab,
-  _tweetLists :: M.Map TabName ListView
+  _tweetLists :: M.Map TabName ListView,
+  _meUser :: User
   }
 
 makeLenses ''ListView
@@ -105,6 +106,7 @@ defClient = Client
   (editorText "tweetbox" (vBox . fmap txt) (Just 5) "")
   (Home TLView)
   (M.fromList [(tab, ListView [] 0) | tab <- [HomeTab, NotificationTab]])
+  (error "not initialized")
 
 fetchTweetThread :: Chan Timeline -> IO ()
 fetchTweetThread channel = do
@@ -145,12 +147,13 @@ main = do
   forkIO $ fetchTweetThread channel
 
   size <- displayBounds =<< outputForConfig =<< standardIOConfig
+  me <- call twInfo mgr accountVerifyCredentials
 
   customMain
     (standardIOConfig >>= mkVty)
     (Just channel)
     app
-    (defClient & screenSize .~ size)
+    (defClient & screenSize .~ size & meUser .~ me)
 
   where
     app :: (?mgr :: Manager, ?twInfo :: TWInfo) => App Client Timeline String
@@ -238,14 +241,14 @@ main = do
           continue $ client
             & currentTweetList . items . ix (client ^. currentTweetList ^. index) . ofStatus . statusFavorited .~ Just True
         AppEvent tw ->
-          let consTweet tab =
-                continue $ client
+          let consTweet tab cl = cl
                 & tweetLists . ix tab . items %~ (tw :)
                 & tweetLists . ix tab . index %~ (\i -> if i == 0 then 0 else i + 1)
           in
           case tw of
-            (TFavorite _ _) -> consTweet NotificationTab
-            _ -> consTweet HomeTab
+            (TFavorite _ _) -> continue $ client & consTweet NotificationTab
+            (TStatusRT tw) | tw ^. rsRetweetedStatus ^. statusUser ^. userId == client ^. meUser ^. userId -> continue $ client & consTweet HomeTab & consTweet NotificationTab
+            _ -> continue $ client & consTweet HomeTab
         _ -> continue client
 
     widgets client = case client ^. currentTab of
@@ -267,11 +270,11 @@ main = do
           cropBottomBy 2 $ vBox $ fmap (\(i,st) -> renderTweet (i == 0) st) $ zip [0..] $ drop (client ^. currentTweetList ^. index) $ client ^. currentTweetList ^. items
 
         renderTweet = go where
-          scrName sn =
-            onAttr (resetStyle transparent) $ (onAttr (transparent `fore` red `style` underline) $ txt "@" <+> txt sn) <+> txt " "
+          scrName sn isMe =
+            onAttr (resetStyle transparent) $ (onAttr (transparent `fore` (if isMe then blue else red) `style` underline) $ txt "@" <+> txt sn) <+> txt " "
           dspName n = txt n
           name user =
-            scrName (user ^. userScreenName)
+            scrName (user ^. userScreenName) (client ^. meUser ^. userId == user ^. userId)
             <+> txt "(" <+> dspName (user ^. userName) <+> txt ")"
 
           nameRT rtw =
