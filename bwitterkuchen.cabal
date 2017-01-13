@@ -19,7 +19,7 @@ library
   build-depends:       base >= 4.7 && < 5
   default-language:    Haskell2010
 
-executable bwitterkuchen-exe
+executable bwitterkuchen
   hs-source-dirs:      app
   main-is:             Main.hs
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
@@ -36,6 +36,16 @@ executable bwitterkuchen-exe
                      , containers
                      , vector
                      , text-zipper
+  default-language:    Haskell2010
+
+executable auth
+  hs-source-dirs:      app
+  main-is:             Auth.hs
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -main-is Auth
+  build-depends:       base
+                     , twitter-conduit
+                     , authenticate-oauth
+                     , bytestring
   default-language:    Haskell2010
 
 test-suite bwitterkuchen-test
