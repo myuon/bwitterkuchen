@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams #-}
-module Main where
+module CUI where
 
 import Brick
 import Brick.Util
