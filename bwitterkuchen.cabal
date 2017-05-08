@@ -36,6 +36,7 @@ executable bwitterkuchen
                      , containers
                      , vector
                      , text-zipper
+                     , bytestring
   default-language:    Haskell2010
 
 executable auth
