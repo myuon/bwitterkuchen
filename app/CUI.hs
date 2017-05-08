@@ -1,8 +1,6 @@
 {-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams #-}
-module Main where
+module CUI where
 
-import Lib
-import Credential
 import Brick
 import Brick.Util
 import Brick.Types
@@ -15,6 +13,7 @@ import Graphics.Vty.Attributes
 import Web.Twitter.Conduit hiding (map, index, inReplyToStatusId)
 import Web.Twitter.Conduit.Parameters
 import Web.Twitter.Types.Lens hiding (Event, text)
+import qualified Data.ByteString.Char8 as S8
 import qualified Data.Conduit as C
 import qualified Data.Conduit.List as CL
 import qualified Data.Text as T
@@ -108,11 +107,11 @@ defClient = Client
   (M.fromList [(tab, ListView [] 0) | tab <- [HomeTab, NotificationTab]])
   (error "not initialized")
 
-fetchTweetThread :: Chan Timeline -> IO ()
+fetchTweetThread :: (?twInfo :: TWInfo) => Chan Timeline -> IO ()
 fetchTweetThread channel = do
   mgr <- newManager tlsManagerSettings
   runResourceT $ do
-    src <- stream twInfo mgr userstream
+    src <- stream ?twInfo mgr userstream
     src C.$$+- CL.mapM_ (liftIO . getStream mgr)
 
   where
@@ -121,7 +120,7 @@ fetchTweetThread channel = do
       case t of
         SStatus tw ->
           case tw ^. statusInReplyToStatusId of
-            Just sid -> writeChan channel =<< getStatusReplies tw (call twInfo mgr . showId)
+            Just sid -> writeChan channel =<< getStatusReplies tw (call ?twInfo mgr . showId)
             Nothing -> writeChan channel $ TStatus tw
         SRetweetedStatus tw -> writeChan channel $ TStatusRT tw
         SEvent ev | ev ^. evEvent == "favorite" ->
@@ -138,8 +137,24 @@ textWrap w text
   where
     maxWidth = maximum [n | n <- [0..T.length text], textWidth (T.take n text) < w]
 
+genTWInfo :: IO TWInfo
+genTWInfo = do
+  putStrLn "screen_name?: "
+  sc <- getLine
+  xs <- S8.lines <$> S8.readFile ("token/" ++ sc)
+
+  return $ setCredential
+    (twitterOAuth
+     { oauthConsumerKey = xs!!0
+     , oauthConsumerSecret = xs!!1 })
+    (Credential
+     [ ("oauth_token", xs!!2)
+     , ("oauth_token_secret", xs!!3) ])
+    def
+
 main = do
   mgr <- newManager tlsManagerSettings
+  twInfo <- genTWInfo
   let ?twInfo = twInfo
   let ?mgr = mgr
   
