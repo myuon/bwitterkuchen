@@ -9,12 +9,18 @@ import Data.Monoid
 import System.Environment
 import System.IO (hFlush, stdout)
 
-tokens :: OAuth
-tokens = twitterOAuth
-  { oauthConsumerKey = "6WBP3dtynshO2NmZuauQ0QkJn"
-  , oauthConsumerSecret = "OyCsFy62s8GFCqDOZ4gLo5jN6pJ4bu6Bu0oCKoH8rkBUe7HA5t"
-  , oauthCallback = Just "oob"
-  }
+genToken :: IO OAuth
+genToken = do
+  putStrLn "ConsumerKey?: "
+  key <- S8.getLine
+  putStrLn "ConsumerSecret?: "
+  secret <- S8.getLine
+
+  return $ twitterOAuth
+    { oauthConsumerKey = key
+    , oauthConsumerSecret = secret
+    , oauthCallback = Just "oob"
+    }
 
 authorize :: OAuth -> Manager -> IO Credential
 authorize oauth mgr = do
@@ -25,17 +31,20 @@ authorize oauth mgr = do
   where
     getPIN url = do
       putStrLn $ "browse URL: " ++ url
-      putStrLn "PIN Code?"
+      putStr "PIN Code?: "
       S8.getLine
 
 main :: IO ()
 main = do
   mgr <- newManager tlsManagerSettings
-  Credential cred <- authorize tokens mgr
+  token <- genToken
+  Credential cred <- authorize token mgr
   let fromJust (Just s) = s
   let get k = fromJust $ lookup k cred
 
   S8.writeFile ("token/" ++ S8.unpack (get "screen_name")) $ S8.unlines [
+    oauthConsumerKey token,
+    oauthConsumerSecret token,
     fromJust $ lookup "oauth_token" cred,
     fromJust $ lookup "oauth_token_secret" cred
     ]
