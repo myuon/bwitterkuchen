@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams #-}
 module Main where
 
-import Lib
 import Brick
 import Brick.Util
 import Brick.Types
