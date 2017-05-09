@@ -8,6 +8,7 @@ import qualified Brick.Widgets.Edit as W
 import qualified Brick.Widgets.List as W
 import qualified Graphics.Vty as Vty
 import Web.Twitter.Conduit hiding (map, index, inReplyToStatusId)
+import Web.Twitter.Types (RetweetedStatus(RetweetedStatus))
 import Web.Twitter.Types.Lens
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.Conduit as C
@@ -37,6 +38,22 @@ data Timeline =
 
 makePrisms ''Timeline
 
+fromStatus :: Status -> Timeline
+fromStatus st =
+  case st^.statusRetweetedStatus of
+    Just u ->
+      TStatusRT $ RetweetedStatus
+              (st^.statusCreatedAt)
+              (st^.statusId)
+              (st^.statusText)
+              (st^.statusSource)
+              (st^.statusTruncated)
+              (st^.statusEntities)
+              (st^.statusUser)
+              u
+              (st^.statusCoordinates)
+    Nothing -> TStatus st
+              
 fetchTweetThread :: Chan Timeline -> AuthM ()
 fetchTweetThread channel = do
   runResourceT $ do
@@ -74,6 +91,7 @@ makeLenses ''Client
 commandList :: V.Vector (T.Text,T.Text)
 commandList = V.fromList
   [ ("tweet", "tweet (C-t)")
+  , ("favo", "favo (C-f)")
   , ("quit", "quit") ]
 
 defClient :: Client
@@ -105,18 +123,42 @@ app = App widgets showFirstCursor eventHandler return attrmap where
     \case
       TStatus tw -> padRight Max $
         hBox [ withAttr "user-name" $ txt $ tw^.user^.name
-             , withAttr "screen-name" $ txt " @"
-             , withAttr "screen-name" $ txt $ tw^.user^.screen_name ]
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.user^.screen_name ]
+             ]
         <=>
         hBox [ txt $ tw^.text ]
-      q -> txt $ T.pack $ show q
+      TStatusReply tw _ threads -> padRight Max $
+        hBox [ txt "! "
+             , withAttr "user-name" $ txt $ tw^.user^.name
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.user^.screen_name ]
+             ]
+        <=>
+        hBox [ txt $ tw^.text ]
+      TStatusRT tw -> padRight Max $
+        hBox [ withAttr "user-name" $ txt $ tw^.rsRetweetedStatus^.user^.name
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.rsRetweetedStatus^.user^.screen_name ]
+             , txt " [RT by "
+             , txt $ tw^.user^.name
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.user^.screen_name ]
+             , txt "]"
+             ]
+        <=>
+        hBox [ txt $ tw^.rsRetweetedStatus^.text ]
 
   widgets client = case client^.cstate of
     TL ->
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline True $ client^.timeline
       , withAttr "inverted" $ padRight Max $ txt " ---"
-      , vLimit 1 $ W.renderEditor False $ client^.minibuffer
+      , W.renderEditor False $ client^.minibuffer
       ]
     Anything ->
       -- anythingの画面で選択アイテムが上下すると
@@ -124,7 +166,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 8) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "brGreen" $ padRight Max $ txt " ---"
-      , vLimit 5 $ padBottom Max $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
+      , vLimit 5 $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
       , withAttr "brGreen" $ padRight Max $ txt " *anything*"
       , W.renderEditor True (client^.minibuffer)
       ]
@@ -135,7 +177,12 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , vLimit 5 $ W.renderEditor True $ client^.tweetBox
       ]
 
-  eventHandler client =
+  eventHandler client = do
+    let runA m = liftIO $ runReaderT m ?config
+    let favoCommand = case W.listSelectedElement $ client ^. timeline of
+          Just (_, TStatus st) -> runA (favo $ st^.status_id) >> continue client
+          _ -> continue client
+    
     \case
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
@@ -153,9 +200,11 @@ app = App widgets showFirstCursor eventHandler return attrmap where
 
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
+        -- ここの実装さすがにひどい                                     
         case W.listSelectedElement (client^.anything) of
           Just (_,com) | "quit" `T.isPrefixOf` com -> halt client
           Just (_,com) | "tweet" `T.isPrefixOf` com -> continue $ client & cstate .~ Tweet
+          Just (_,com) | "favo" `T.isPrefixOf` com -> favoCommand
           _ -> continue client
       VtyEvent ev | client^.cstate == Anything -> do
         client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
@@ -179,7 +228,7 @@ main = runAuth $ do
 
   size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
   me <- callM accountVerifyCredentials
-  xs <- return [] --fetchTimeline 10
+  xs <- fetchTimeline 20
 
   cfg <- ask
   let ?config = cfg
@@ -191,5 +240,5 @@ main = runAuth $ do
     (defClient
      & screenSize .~ size
      & meUser .~ me
-     & timeline %~ W.listReplace (V.fromList $ TStatus <$> reverse xs) (Just 0))
+     & timeline %~ W.listReplace (V.fromList $ reverse $ fmap fromStatus xs) (Just 0))
 

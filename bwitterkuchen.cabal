@@ -51,6 +51,7 @@ executable kuchen
                      , bwitterkuchen
                      , brick
                      , twitter-conduit
+                     , twitter-types
                      , twitter-types-lens
                      , conduit
                      , text
