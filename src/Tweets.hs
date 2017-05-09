@@ -60,11 +60,11 @@ fetchStatus = callM . showId
 favo :: StatusId -> AuthM Status
 favo st = callM $ favoritesCreate st
 
-tweet :: String -> AuthM Status
-tweet txt = callM $ update $ T.pack txt
+tweet :: T.Text -> AuthM Status
+tweet = callM . update
 
-replyTo :: StatusId -> String -> AuthM Status
-replyTo st txt = callM $ update (T.pack txt) & inReplyToStatusId ?~ st
+replyTo :: StatusId -> T.Text -> AuthM Status
+replyTo st txt = callM $ update txt & inReplyToStatusId ?~ st
 
 fetchThread :: Status -> AuthM [Status]
 fetchThread = go where
