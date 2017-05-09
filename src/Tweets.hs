@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, OverloadedStrings, ImplicitParams #-}
+{-# LANGUAGE GADTs, OverloadedStrings, ImplicitParams, FlexibleContexts #-}
 module Tweets where
 
 import Control.Lens
@@ -40,11 +40,16 @@ runAuth m = do
   tw <- genTWInfo
   runReaderT m $ Config mgr tw
 
+forkAuth :: AuthM a -> AuthM (IO a)
+forkAuth m = do
+  cfg <- ask
+  return $ runReaderT m cfg
+
 callM :: (FromJSON res) => APIRequest api res -> AuthM res
 callM api = ask >>= \config -> lift $ call (twInfo config) (manager config) api
 
-streamM :: (MonadResource m, FromJSON res) => APIRequest api res -> AuthM (m (ResumableSource m res))
-streamM api = ask >>= \config -> return $ stream (twInfo config) (manager config) api
+streamM :: (FromJSON res, MonadResource m, MonadReader Config m) => APIRequest api res -> m (ResumableSource m res)
+streamM api = ask >>= \config -> stream (twInfo config) (manager config) api
 
 fetchTimeline :: Integer -> AuthM [Status]
 fetchTimeline n = callM $ homeTimeline & count ?~ n

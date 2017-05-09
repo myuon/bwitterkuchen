@@ -1,4 +1,5 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams, RankNTypes, DataKinds #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams #-}
+{-# LANGUAGE RankNTypes, DataKinds, LambdaCase #-}
 module CUI where
 
 import Tweets
@@ -37,18 +38,18 @@ makePrisms ''Timeline
 
 fetchTweetThread :: Chan Timeline -> AuthM ()
 fetchTweetThread channel = do
-  config <- ask
   runResourceT $ do
-    src <- stream (twInfo config) (manager config) userstream
-    src C.$$+- CL.mapM_ (liftIO . runAuth . getStream (manager config))
+    src <- streamM userstream
+    src C.$$+- CL.mapM_ (lift . getStream)
 
   where
-    getStream :: Manager -> StreamingAPI -> AuthM ()
-    getStream mgr t = do
-      case t of
-        SStatus tw ->
+    getStream :: StreamingAPI -> AuthM ()
+    getStream =
+      \case
+        SStatus tw -> do
           case tw ^. statusInReplyToStatusId of
-            Just sid -> lift $ writeChan channel . TStatusReply tw False =<< runAuth (fetchThread tw)
+            Just sid -> do
+              lift . writeChan channel . TStatusReply tw False =<< fetchThread tw
             Nothing -> lift $ writeChan channel $ TStatus tw
         SRetweetedStatus tw -> lift $ writeChan channel $ TStatusRT tw
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
@@ -74,26 +75,41 @@ defClient = Client
   (0,0)
   (W.editorText "tweetbox" (vBox . fmap txt) (Just 5) "")
   HomeTab
-  (W.list "tweetList" (V.empty) 1)
+  (W.list "tweetList" V.empty 2)
   (error "not initialized")
 
 app :: App Client Timeline T.Text
-app = App widgets showFirstCursor eventHandler return def where
-  renderTimeline focused tl = case tl of
-    TStatus tw -> txt $ tw^.text
-    _ -> txt "other"
+app = App widgets showFirstCursor eventHandler return attrmap where
+  attrmap client =
+    attrMap (fg Vty.white)
+    [ ("user-name", Vty.withStyle mempty Vty.bold)
+    , ("screen-name", fg Vty.red)
+    , (W.listSelectedFocusedAttr, Vty.black `on` Vty.white)
+    , (W.listSelectedAttr, Vty.black `on` Vty.white)
+    ]
+  
+  renderTimeline _ =
+    \case
+      TStatus tw -> padRight Max $
+        hBox [ withAttr "user-name" $ txt $ tw^.user^.name
+             , withAttr "screen-name" $ txt " @"
+             , withAttr "screen-name" $ txt $ tw^.user^.screen_name ]
+        <=>
+        hBox [ txt $ tw^.text ]
+      q -> txt $ T.pack $ show q
 
-  widgets client = [W.renderList renderTimeline False (client^.timeline)]
-  eventHandler client ev =
-    case ev of
+  widgets client = [W.renderList renderTimeline True $ client^.timeline]
+  eventHandler client =
+    \case
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) -> halt client
+      VtyEvent ev -> continue =<< handleEventLensed client timeline W.handleListEvent ev
       AppEvent tw ->
-        continue $ client & timeline %~ W.listInsert 0 tw
+        continue $ client & timeline %~ W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
       _ -> continue client
 
 main = runAuth $ do
   channel <- lift newChan
-  lift . forkIO . runReaderT (fetchTweetThread channel) =<< ask
+  lift . forkIO =<< forkAuth (fetchTweetThread channel)
 
   size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
   me <- callM accountVerifyCredentials
@@ -103,5 +119,8 @@ main = runAuth $ do
     (Vty.standardIOConfig >>= Vty.mkVty)
     (Just channel)
     app
-    (defClient & screenSize .~ size & meUser .~ me & timeline %~ W.listReplace (V.fromList $ TStatus <$> xs) Nothing)
+    (defClient
+     & screenSize .~ size
+     & meUser .~ me
+     & timeline %~ W.listReplace (V.fromList $ TStatus <$> reverse xs) (Just 0))
 
