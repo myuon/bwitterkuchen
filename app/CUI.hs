@@ -1,24 +1,23 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams, RankNTypes #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, ImplicitParams, RankNTypes, DataKinds #-}
 module CUI where
 
 import Tweets
 import Brick
-import Graphics.Vty
+import qualified Brick.Widgets.Edit as W
+import qualified Brick.Widgets.List as W
+import qualified Graphics.Vty as Vty
 import Web.Twitter.Conduit hiding (map, index, inReplyToStatusId)
-import Web.Twitter.Conduit.Parameters
-import Web.Twitter.Types.Lens hiding (Event, text)
+import Web.Twitter.Types.Lens
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.Conduit as C
 import qualified Data.Conduit.List as CL
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
-import Control.Monad
-import Control.Monad.IO.Class
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Resource
-import Control.Monad.Reader
+import Control.Monad.Reader (lift, ask, runReaderT)
 import Control.Lens hiding (index)
-import Control.Concurrent
-import Data.IORef
+import Control.Concurrent (forkIO, Chan, newChan, writeChan)
 import qualified Data.Vector as V
 import qualified Data.Map as M
 import Data.Monoid
@@ -64,12 +63,54 @@ fetchTweetThread channel = do
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
         _ -> return ()
 
+data TabName = HomeTab | NotificationTab
+  deriving (Eq, Ord, Show)
+
+data Client = Client {
+  _screenSize :: (Int,Int),
+  _tweetbox :: W.Editor T.Text String,
+  _currentTab :: TabName,
+  _timeline :: W.List T.Text Timeline,
+  _meUser :: User
+  }
+
+
+makePrisms ''TabName
+makeLenses ''Client
+
+defClient :: Client
+defClient = Client
+  (0,0)
+  (W.editorText "tweetbox" (vBox . fmap txt) (Just 5) "")
+  HomeTab
+  (W.list "tweetList" (V.empty) 1)
+  (error "not initialized")
+
+app :: App Client Timeline T.Text
+app = App widgets showFirstCursor eventHandler return def where
+  renderTimeline focused tl = case tl of
+    TStatus tw -> txt $ tw^.text
+    _ -> txt "other"
+
+  widgets client = [W.renderList renderTimeline False (client^.timeline)]
+  eventHandler client ev =
+    case ev of
+      VtyEvent (Vty.EvKey (Vty.KChar 'q') []) -> halt client
+      AppEvent tw ->
+        continue $ client & timeline %~ W.listInsert 0 tw
+      _ -> continue client
+
 main = runAuth $ do
   channel <- lift newChan
   lift . forkIO . runReaderT (fetchTweetThread channel) =<< ask
 
-  size <- lift $ displayBounds =<< outputForConfig =<< standardIOConfig
+  size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
   me <- callM accountVerifyCredentials
-  lift $ print me
+  xs <- fetch 10
 
-  return ()
+  lift $ customMain
+    (Vty.standardIOConfig >>= Vty.mkVty)
+    (Just channel)
+    app
+    (defClient & screenSize .~ size & meUser .~ me & timeline %~ W.listReplace (V.fromList $ TStatus <$> xs) Nothing)
+
