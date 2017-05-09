@@ -1,6 +1,6 @@
 
 name:                bwitterkuchen
-version:             0.1.0.0
+version:             0.1.1.0
 synopsis:            CUI Twitter Client
 description:         Please see README.md
 homepage:            https://github.com/myuon/bwitterkuchen
@@ -8,7 +8,7 @@ license:             MIT
 license-file:        LICENSE
 author:              myuon
 maintainer:          ioi.joi.koi.loi@gmail.com
-copyright:           2016 myuon
+copyright:           2017 myuon
 category:            Web
 build-type:          Simple
 -- extra-source-files:
