@@ -1,6 +1,6 @@
 
 name:                bwitterkuchen
-version:             0.1.2.0
+version:             0.1.3.0
 synopsis:            CUI Twitter Client
 description:         Please see README.md
 homepage:            https://github.com/myuon/bwitterkuchen
@@ -51,6 +51,7 @@ executable kuchen
                      , bwitterkuchen
                      , brick
                      , twitter-conduit
+                     , twitter-types
                      , twitter-types-lens
                      , conduit
                      , text

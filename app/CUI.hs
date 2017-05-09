@@ -8,6 +8,7 @@ import qualified Brick.Widgets.Edit as W
 import qualified Brick.Widgets.List as W
 import qualified Graphics.Vty as Vty
 import Web.Twitter.Conduit hiding (map, index, inReplyToStatusId)
+import Web.Twitter.Types (RetweetedStatus(RetweetedStatus))
 import Web.Twitter.Types.Lens
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.Conduit as C
@@ -25,18 +26,43 @@ import qualified Data.Map as M
 import Data.Monoid
 import Data.Text.Zipper (clearZipper)
 
+listSelectedElemL :: Lens' (W.List n e) (Maybe e)
+listSelectedElemL =
+  lens (\w -> ((w ^. W.listElementsL) V.!) <$> w ^. W.listSelectedL)
+       (\w me -> case (me, w^.W.listSelectedL) of
+                   (Just e, Just n) -> w & W.listElementsL %~ (V.// [(n,e)])
+                   _ -> w
+       )
+
 data Timeline =
   TStatus Status
   | TStatusRT RetweetedStatus
   | TStatusReply
     { status :: Status
     , unfolded :: Bool
-    , replyTo :: [Status]
+    , thread :: [Status]
     }
   deriving (Eq, Show)
 
 makePrisms ''Timeline
 
+fromStatus :: Status -> Timeline
+fromStatus st
+  | st^.statusRetweetedStatus /= Nothing =
+    TStatusRT $ RetweetedStatus
+                (st^.statusCreatedAt)
+                (st^.statusId)
+                (st^.statusText)
+                (st^.statusSource)
+                (st^.statusTruncated)
+                (st^.statusEntities)
+                (st^.statusUser)
+                ((\(Just u) -> u) $ st^.statusRetweetedStatus)
+                (st^.statusCoordinates)
+  | st^.statusInReplyToStatusId /= Nothing =
+    TStatusReply st False []
+  | otherwise = TStatus st
+              
 fetchTweetThread :: Chan Timeline -> AuthM ()
 fetchTweetThread channel = do
   runResourceT $ do
@@ -47,11 +73,7 @@ fetchTweetThread channel = do
     getStream :: StreamingAPI -> AuthM ()
     getStream =
       \case
-        SStatus tw -> do
-          case tw ^. statusInReplyToStatusId of
-            Just sid -> do
-              lift . writeChan channel . TStatusReply tw False =<< fetchThread tw
-            Nothing -> lift $ writeChan channel $ TStatus tw
+        SStatus tw -> lift $ writeChan channel $ fromStatus tw
         SRetweetedStatus tw -> lift $ writeChan channel $ TStatusRT tw
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
         _ -> return ()
@@ -74,7 +96,10 @@ makeLenses ''Client
 commandList :: V.Vector (T.Text,T.Text)
 commandList = V.fromList
   [ ("tweet", "tweet (C-t)")
-  , ("quit", "quit") ]
+  , ("favo", "favo (C-f)")
+  , ("unfold", "unfold (C-u)")
+  , ("quit", "quit")
+  ]
 
 defClient :: Client
 defClient = Client
@@ -87,8 +112,8 @@ defClient = Client
   (error "not initialized")
 
 
--- ·ë¶ÉIOÍí¤ß¤Ë¤Ê¤ê¤½¤¦
--- EventM¤¬MonadIO¤À¤¬ReaderT·ÐÍ³¤Ç¸Æ¤Ù¤Ê¤¤¤Î¤Ç¤ª¤½¤é¤¯Implicit¤Ç¤â¤é¤¦¤·¤«¤Ê¤¤
+-- çµå±€IOçµ¡ã¿ã«ãªã‚Šãã†
+-- EventMãŒMonadIOã ãŒReaderTçµŒç”±ã§å‘¼ã¹ãªã„ã®ã§ãŠãã‚‰ãImplicitã§ã‚‚ã‚‰ã†ã—ã‹ãªã„
 app :: (?config :: Config) => App Client Timeline T.Text
 app = App widgets showFirstCursor eventHandler return attrmap where
   attrmap client =
@@ -101,30 +126,66 @@ app = App widgets showFirstCursor eventHandler return attrmap where
     , ("brGreen", Vty.black `on` Vty.brightGreen)
     ]
   
-  renderTimeline _ =
+  renderTimeline b =
     \case
       TStatus tw -> padRight Max $
         hBox [ withAttr "user-name" $ txt $ tw^.user^.name
-             , withAttr "screen-name" $ txt " @"
-             , withAttr "screen-name" $ txt $ tw^.user^.screen_name ]
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.user^.screen_name ]
+             , if (tw^.statusFavorited == Just True) then txt " â˜…" else txt ""
+             , if (tw^.statusRetweeted == Just True) then txt " ðŸ”ƒ" else txt ""
+             ]
         <=>
         hBox [ txt $ tw^.text ]
-      q -> txt $ T.pack $ show q
+      TStatusReply tw unfolded threads -> padRight Max $
+        hBox [ txt "! "
+             , withAttr "user-name" $ txt $ tw^.user^.name
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.user^.screen_name ]
+             , if (tw^.statusFavorited == Just True) then txt " â˜…" else txt ""
+             , if (tw^.statusRetweeted == Just True) then txt " ðŸ”ƒ" else txt ""
+             ]
+        <=>
+        hBox [ txt $ tw^.text ]
+        <=>
+        if unfolded
+        then hBox [ txt "â”—"
+                  , padLeft (Pad 2) $ vBox $ fmap (renderTimeline b . TStatus) $ tail threads
+                  ]
+        else hBox []
+      TStatusRT tw -> padRight Max $
+        hBox [ withAttr "user-name" $ txt $ tw^.rsRetweetedStatus^.user^.name
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.rsRetweetedStatus^.user^.screen_name ]
+             , txt " [RT by "
+             , txt $ tw^.user^.name
+             , withAttr "screen-name" $
+               hBox [ txt " @"
+                    , txt $ tw^.user^.screen_name ]
+             , txt "]"
+             , if (tw^.rsRetweetedStatus^.statusFavorited == Just True) then txt " â˜…" else txt ""
+             , if (tw^.rsRetweetedStatus^.statusRetweeted == Just True) then txt " ðŸ”ƒ" else txt ""
+             ]
+        <=>
+        hBox [ txt $ tw^.rsRetweetedStatus^.text ]
 
   widgets client = case client^.cstate of
     TL ->
       return $ vBox
-      [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline True $ client^.timeline
+      [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "inverted" $ padRight Max $ txt " ---"
-      , vLimit 1 $ W.renderEditor False $ client^.minibuffer
+      , W.renderEditor False $ client^.minibuffer
       ]
     Anything ->
-      -- anything¤Î²èÌÌ¤ÇÁªÂò¥¢¥¤¥Æ¥à¤¬¾å²¼¤¹¤ë¤È
-      -- É½¼¨¤¬¤ª¤«¤·¤¤¡©
+      -- anythingã®ç”»é¢ã§é¸æŠžã‚¢ã‚¤ãƒ†ãƒ ãŒä¸Šä¸‹ã™ã‚‹ã¨
+      -- è¡¨ç¤ºãŒãŠã‹ã—ã„ï¼Ÿ
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 8) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "brGreen" $ padRight Max $ txt " ---"
-      , vLimit 5 $ padBottom Max $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
+      , vLimit 5 $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
       , withAttr "brGreen" $ padRight Max $ txt " *anything*"
       , W.renderEditor True (client^.minibuffer)
       ]
@@ -135,12 +196,50 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , vLimit 5 $ W.renderEditor True $ client^.tweetBox
       ]
 
-  eventHandler client =
+  eventHandler client = do
+    let runA m = liftIO $ runReaderT m ?config
+    let favoCommand = case W.listSelectedElement $ client ^. timeline of
+          Just (_, TStatus st) -> do
+            runA (favo $ st^.status_id)
+            continue $ client
+              & timeline . listSelectedElemL . _Just .~ (TStatus $ st & statusFavorited .~ Just True)
+          _ -> continue client
+    let unfoldCommand = case W.listSelectedElement $ client ^. timeline of
+          Just (_, TStatusReply st False []) -> do
+            thread <- runA $ fetchThread st
+            continue $ client & timeline . listSelectedElemL . _Just .~ TStatusReply st True thread
+          Just (_, TStatusReply st b th) ->
+            continue $ client & timeline . listSelectedElemL . _Just .~ TStatusReply st (not b) th
+          _ -> continue client
+    
     \case
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
       VtyEvent (Vty.EvKey (Vty.KChar 'x') modfs) | (Vty.MMeta `elem` modfs || Vty.MAlt `elem` modfs) && client^.cstate == TL -> continue $ client & cstate .~ Anything
-      VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
+      VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> unfoldCommand
+      VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> favoCommand
+
+      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
+      VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
+        -- ã“ã“ã®å®Ÿè£…ã•ã™ãŒã«ã²ã©ã„                                     
+        case W.listSelectedElement (client^.anything) of
+          Just (_,com) | "quit" `T.isPrefixOf` com -> halt client
+          Just (_,com) | "tweet" `T.isPrefixOf` com -> continue $ client & cstate .~ Tweet
+          Just (_,com) | "favo" `T.isPrefixOf` com ->
+            fmap (\x -> x & cstate .~ TL
+                          & minibuffer . W.editContentsL %~ clearZipper) <$> favoCommand
+          Just (_,com) | "unfold" `T.isPrefixOf` com ->
+            fmap (\x -> x & cstate .~ TL
+                          & minibuffer . W.editContentsL %~ clearZipper) <$> unfoldCommand
+          _ -> continue client
+      VtyEvent ev | client^.cstate == Anything -> do
+        client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
+        client'' <- handleEventLensed client' anything W.handleListEvent ev
+
+        -- anythingã®å®Ÿè£…
+        -- åŠ¹çŽ‡ã‚¥ï¼
+        let ws = T.words $ head $ W.getEditContents $ client'' ^. minibuffer
+        continue $ client'' & anything . W.listElementsL .~ fmap snd (V.filter (\com -> all (\w -> w `T.isInfixOf` fst com) ws) commandList)
 
       VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
@@ -149,22 +248,8 @@ app = App widgets showFirstCursor eventHandler return attrmap where
         liftIO $ flip runReaderT ?config $ tweet text
         continue $ client & cstate .~ TL & tweetBox . W.editContentsL %~ clearZipper
 
+      VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
       VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
-
-      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
-        case W.listSelectedElement (client^.anything) of
-          Just (_,com) | "quit" `T.isPrefixOf` com -> halt client
-          Just (_,com) | "tweet" `T.isPrefixOf` com -> continue $ client & cstate .~ Tweet
-          _ -> continue client
-      VtyEvent ev | client^.cstate == Anything -> do
-        client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
-        client'' <- handleEventLensed client' anything W.handleListEvent ev
-
-        -- anything¤Î¼ÂÁõ
-        -- ¸úÎ¨Ž©¡ª
-        let ws = T.words $ head $ W.getEditContents $ client'' ^. minibuffer
-        continue $ client'' & anything . W.listElementsL .~ fmap snd (V.filter (\com -> all (\w -> w `T.isInfixOf` fst com) ws) commandList)
 
       AppEvent tw -> continue $ flip execState client $ do
         timeline %= W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
@@ -179,7 +264,7 @@ main = runAuth $ do
 
   size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
   me <- callM accountVerifyCredentials
-  xs <- return [] --fetchTimeline 10
+  xs <- fetchTimeline 20
 
   cfg <- ask
   let ?config = cfg
@@ -191,5 +276,5 @@ main = runAuth $ do
     (defClient
      & screenSize .~ size
      & meUser .~ me
-     & timeline %~ W.listReplace (V.fromList $ TStatus <$> reverse xs) (Just 0))
+     & timeline %~ W.listReplace (V.fromList $ reverse $ fmap fromStatus xs) (Just 0))
 
