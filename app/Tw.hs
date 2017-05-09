@@ -14,8 +14,8 @@ main = do
   let showStatus s = T.unpack $ T.concat ["@", s^.user^.screen_name, ": [", T.pack (show (s^.status_id)), "] ", s^.text]
 
   getArgs >>= \xs -> case xs of
-    ("fetch":[]) -> mapM_ putStrLn . fmap showStatus =<< runAuth (fetch 20)
-    ("fetch":n:_) -> mapM_ putStrLn . fmap showStatus =<< runAuth (fetch (read n))
+    ("fetch":[]) -> mapM_ putStrLn . fmap showStatus =<< runAuth (fetchTimeline 20)
+    ("fetch":n:_) -> mapM_ putStrLn . fmap showStatus =<< runAuth (fetchTimeline (read n))
     ("favo":n:_) -> putStrLn . showStatus =<< runAuth (favo (read n))
     ("tweet":txt:_) -> putStrLn . showStatus =<< runAuth (tweet txt)
     ("replyTo":n:txt:_) -> putStrLn . showStatus =<< runAuth (replyTo (read n) txt)
