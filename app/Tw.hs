@@ -11,13 +11,13 @@ import System.Environment
 main = do
   mgr <- newManager tlsManagerSettings
   let ?mgr = mgr
-  let showStatus s = T.unpack $ T.concat ["@", s^.user^.screen_name, ": [", T.pack (show (s^.status_id)), "] ", s^.text]
+  let showStatus s = T.unpack $ T.concat ["@", s^.user^.screen_name, ": [", T.pack $ show $ s^.status_id, "] ", s^.text]
 
   getArgs >>= \xs -> case xs of
     ("fetch":[]) -> mapM_ putStrLn . fmap showStatus =<< runAuth (fetchTimeline 20)
     ("fetch":n:_) -> mapM_ putStrLn . fmap showStatus =<< runAuth (fetchTimeline (read n))
     ("favo":n:_) -> putStrLn . showStatus =<< runAuth (favo (read n))
-    ("tweet":txt:_) -> putStrLn . showStatus =<< runAuth (tweet txt)
-    ("replyTo":n:txt:_) -> putStrLn . showStatus =<< runAuth (replyTo (read n) txt)
+    ("tweet":txt:_) -> putStrLn . showStatus =<< runAuth (tweet $ T.pack txt)
+    ("replyTo":n:txt:_) -> putStrLn . showStatus =<< runAuth (replyTo (read n) (T.pack txt))
     _ -> print xs
 

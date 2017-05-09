@@ -86,7 +86,9 @@ defClient = Client
   (error "not initialized")
 
 
-app :: App Client Timeline T.Text
+-- 結局IO絡みになりそう
+-- EventMがMonadIOだがReaderT経由で呼べないのでおそらくImplicitでもらうしかない
+app :: (?config :: Config) => App Client Timeline T.Text
 app = App widgets showFirstCursor eventHandler return attrmap where
   attrmap client =
     attrMap (fg Vty.white)
@@ -139,6 +141,11 @@ app = App widgets showFirstCursor eventHandler return attrmap where
 
       VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
+      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> do
+        let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ W.getEditContents $ client ^. tweetBox
+        liftIO $ flip runReaderT ?config $ tweet text
+        continue $ client & cstate .~ TL
+
       VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
@@ -167,6 +174,9 @@ main = runAuth $ do
   size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
   me <- callM accountVerifyCredentials
   xs <- return [] --fetchTimeline 10
+
+  cfg <- ask
+  let ?config = cfg
 
   lift $ customMain
     (Vty.standardIOConfig >>= Vty.mkVty)
