@@ -26,33 +26,42 @@ import qualified Data.Map as M
 import Data.Monoid
 import Data.Text.Zipper (clearZipper)
 
+listSelectedElemL :: Lens' (W.List n e) (Maybe e)
+listSelectedElemL =
+  lens (\w -> ((w ^. W.listElementsL) V.!) <$> w ^. W.listSelectedL)
+       (\w me -> case (me, w^.W.listSelectedL) of
+                   (Just e, Just n) -> w & W.listElementsL %~ (V.// [(n,e)])
+                   _ -> w
+       )
+
 data Timeline =
   TStatus Status
   | TStatusRT RetweetedStatus
   | TStatusReply
     { status :: Status
     , unfolded :: Bool
-    , replyTo :: [Status]
+    , thread :: [Status]
     }
   deriving (Eq, Show)
 
 makePrisms ''Timeline
 
 fromStatus :: Status -> Timeline
-fromStatus st =
-  case st^.statusRetweetedStatus of
-    Just u ->
-      TStatusRT $ RetweetedStatus
-              (st^.statusCreatedAt)
-              (st^.statusId)
-              (st^.statusText)
-              (st^.statusSource)
-              (st^.statusTruncated)
-              (st^.statusEntities)
-              (st^.statusUser)
-              u
-              (st^.statusCoordinates)
-    Nothing -> TStatus st
+fromStatus st
+  | st^.statusRetweetedStatus /= Nothing =
+    TStatusRT $ RetweetedStatus
+                (st^.statusCreatedAt)
+                (st^.statusId)
+                (st^.statusText)
+                (st^.statusSource)
+                (st^.statusTruncated)
+                (st^.statusEntities)
+                (st^.statusUser)
+                ((\(Just u) -> u) $ st^.statusRetweetedStatus)
+                (st^.statusCoordinates)
+  | st^.statusInReplyToStatusId /= Nothing =
+    TStatusReply st False []
+  | otherwise = TStatus st
               
 fetchTweetThread :: Chan Timeline -> AuthM ()
 fetchTweetThread channel = do
@@ -64,11 +73,7 @@ fetchTweetThread channel = do
     getStream :: StreamingAPI -> AuthM ()
     getStream =
       \case
-        SStatus tw -> do
-          case tw ^. statusInReplyToStatusId of
-            Just sid -> do
-              lift . writeChan channel . TStatusReply tw False =<< fetchThread tw
-            Nothing -> lift $ writeChan channel $ TStatus tw
+        SStatus tw -> lift $ writeChan channel $ fromStatus tw
         SRetweetedStatus tw -> lift $ writeChan channel $ TStatusRT tw
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
         _ -> return ()
@@ -92,7 +97,9 @@ commandList :: V.Vector (T.Text,T.Text)
 commandList = V.fromList
   [ ("tweet", "tweet (C-t)")
   , ("favo", "favo (C-f)")
-  , ("quit", "quit") ]
+  , ("unfold", "unfold (C-u)")
+  , ("quit", "quit")
+  ]
 
 defClient :: Client
 defClient = Client
@@ -105,8 +112,8 @@ defClient = Client
   (error "not initialized")
 
 
--- ·ë¶ÉIOÍí¤ß¤Ë¤Ê¤ê¤½¤¦
--- EventM¤¬MonadIO¤À¤¬ReaderT·ÐÍ³¤Ç¸Æ¤Ù¤Ê¤¤¤Î¤Ç¤ª¤½¤é¤¯Implicit¤Ç¤â¤é¤¦¤·¤«¤Ê¤¤
+-- çµå±€IOçµ¡ã¿ã«ãªã‚Šãã†
+-- EventMãŒMonadIOã ãŒReaderTçµŒç”±ã§å‘¼ã¹ãªã„ã®ã§ãŠãã‚‰ãImplicitã§ã‚‚ã‚‰ã†ã—ã‹ãªã„
 app :: (?config :: Config) => App Client Timeline T.Text
 app = App widgets showFirstCursor eventHandler return attrmap where
   attrmap client =
@@ -119,25 +126,35 @@ app = App widgets showFirstCursor eventHandler return attrmap where
     , ("brGreen", Vty.black `on` Vty.brightGreen)
     ]
   
-  renderTimeline _ =
+  renderTimeline b =
     \case
       TStatus tw -> padRight Max $
         hBox [ withAttr "user-name" $ txt $ tw^.user^.name
              , withAttr "screen-name" $
                hBox [ txt " @"
                     , txt $ tw^.user^.screen_name ]
+             , if (tw^.statusFavorited == Just True) then txt " â˜…" else txt ""
+             , if (tw^.statusRetweeted == Just True) then txt " ðŸ”ƒ" else txt ""
              ]
         <=>
         hBox [ txt $ tw^.text ]
-      TStatusReply tw _ threads -> padRight Max $
+      TStatusReply tw unfolded threads -> padRight Max $
         hBox [ txt "! "
              , withAttr "user-name" $ txt $ tw^.user^.name
              , withAttr "screen-name" $
                hBox [ txt " @"
                     , txt $ tw^.user^.screen_name ]
+             , if (tw^.statusFavorited == Just True) then txt " â˜…" else txt ""
+             , if (tw^.statusRetweeted == Just True) then txt " ðŸ”ƒ" else txt ""
              ]
         <=>
         hBox [ txt $ tw^.text ]
+        <=>
+        if unfolded
+        then hBox [ txt "â”—"
+                  , padLeft (Pad 2) $ vBox $ fmap (renderTimeline b . TStatus) $ tail threads
+                  ]
+        else hBox []
       TStatusRT tw -> padRight Max $
         hBox [ withAttr "user-name" $ txt $ tw^.rsRetweetedStatus^.user^.name
              , withAttr "screen-name" $
@@ -149,6 +166,8 @@ app = App widgets showFirstCursor eventHandler return attrmap where
                hBox [ txt " @"
                     , txt $ tw^.user^.screen_name ]
              , txt "]"
+             , if (tw^.rsRetweetedStatus^.statusFavorited == Just True) then txt " â˜…" else txt ""
+             , if (tw^.rsRetweetedStatus^.statusRetweeted == Just True) then txt " ðŸ”ƒ" else txt ""
              ]
         <=>
         hBox [ txt $ tw^.rsRetweetedStatus^.text ]
@@ -156,13 +175,13 @@ app = App widgets showFirstCursor eventHandler return attrmap where
   widgets client = case client^.cstate of
     TL ->
       return $ vBox
-      [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline True $ client^.timeline
+      [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "inverted" $ padRight Max $ txt " ---"
       , W.renderEditor False $ client^.minibuffer
       ]
     Anything ->
-      -- anything¤Î²èÌÌ¤ÇÁªÂò¥¢¥¤¥Æ¥à¤¬¾å²¼¤¹¤ë¤È
-      -- É½¼¨¤¬¤ª¤«¤·¤¤¡©
+      -- anythingã®ç”»é¢ã§é¸æŠžã‚¢ã‚¤ãƒ†ãƒ ãŒä¸Šä¸‹ã™ã‚‹ã¨
+      -- è¡¨ç¤ºãŒãŠã‹ã—ã„ï¼Ÿ
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 8) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "brGreen" $ padRight Max $ txt " ---"
@@ -180,7 +199,17 @@ app = App widgets showFirstCursor eventHandler return attrmap where
   eventHandler client = do
     let runA m = liftIO $ runReaderT m ?config
     let favoCommand = case W.listSelectedElement $ client ^. timeline of
-          Just (_, TStatus st) -> runA (favo $ st^.status_id) >> continue client
+          Just (_, TStatus st) -> do
+            runA (favo $ st^.status_id)
+            continue $ client
+              & timeline . listSelectedElemL . _Just .~ (TStatus $ st & statusFavorited .~ Just True)
+          _ -> continue client
+    let unfoldCommand = case W.listSelectedElement $ client ^. timeline of
+          Just (_, TStatusReply st False []) -> do
+            thread <- runA $ fetchThread st
+            continue $ client & timeline . listSelectedElemL . _Just .~ TStatusReply st True thread
+          Just (_, TStatusReply st b th) ->
+            continue $ client & timeline . listSelectedElemL . _Just .~ TStatusReply st (not b) th
           _ -> continue client
     
     \case
@@ -188,6 +217,8 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
       VtyEvent (Vty.EvKey (Vty.KChar 'x') modfs) | (Vty.MMeta `elem` modfs || Vty.MAlt `elem` modfs) && client^.cstate == TL -> continue $ client & cstate .~ Anything
       VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
+      VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> unfoldCommand
+      VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> favoCommand
 
       VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
@@ -200,18 +231,23 @@ app = App widgets showFirstCursor eventHandler return attrmap where
 
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
-        -- ¤³¤³¤Î¼ÂÁõ¤µ¤¹¤¬¤Ë¤Ò¤É¤¤                                     
+        -- ã“ã“ã®å®Ÿè£…ã•ã™ãŒã«ã²ã©ã„                                     
         case W.listSelectedElement (client^.anything) of
           Just (_,com) | "quit" `T.isPrefixOf` com -> halt client
           Just (_,com) | "tweet" `T.isPrefixOf` com -> continue $ client & cstate .~ Tweet
-          Just (_,com) | "favo" `T.isPrefixOf` com -> favoCommand
+          Just (_,com) | "favo" `T.isPrefixOf` com ->
+            fmap (\x -> x & cstate .~ TL
+                          & minibuffer . W.editContentsL %~ clearZipper) <$> favoCommand
+          Just (_,com) | "unfold" `T.isPrefixOf` com ->
+            fmap (\x -> x & cstate .~ TL
+                          & minibuffer . W.editContentsL %~ clearZipper) <$> unfoldCommand
           _ -> continue client
       VtyEvent ev | client^.cstate == Anything -> do
         client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
         client'' <- handleEventLensed client' anything W.handleListEvent ev
 
-        -- anything¤Î¼ÂÁõ
-        -- ¸úÎ¨Ž©¡ª
+        -- anythingã®å®Ÿè£…
+        -- åŠ¹çŽ‡ã‚¥ï¼
         let ws = T.words $ head $ W.getEditContents $ client'' ^. minibuffer
         continue $ client'' & anything . W.listElementsL .~ fmap snd (V.filter (\com -> all (\w -> w `T.isInfixOf` fst com) ws) commandList)
 
