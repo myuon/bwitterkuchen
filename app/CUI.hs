@@ -216,18 +216,8 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
       VtyEvent (Vty.EvKey (Vty.KChar 'x') modfs) | (Vty.MMeta `elem` modfs || Vty.MAlt `elem` modfs) && client^.cstate == TL -> continue $ client & cstate .~ Anything
-      VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
       VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> unfoldCommand
       VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> favoCommand
-
-      VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> do
-        let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ W.getEditContents $ client ^. tweetBox
-        liftIO $ flip runReaderT ?config $ tweet text
-        continue $ client & cstate .~ TL & tweetBox . W.editContentsL %~ clearZipper
-
-      VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
@@ -250,6 +240,16 @@ app = App widgets showFirstCursor eventHandler return attrmap where
         -- 効率ゥ！
         let ws = T.words $ head $ W.getEditContents $ client'' ^. minibuffer
         continue $ client'' & anything . W.listElementsL .~ fmap snd (V.filter (\com -> all (\w -> w `T.isInfixOf` fst com) ws) commandList)
+
+      VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
+      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
+      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> do
+        let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ W.getEditContents $ client ^. tweetBox
+        liftIO $ flip runReaderT ?config $ tweet text
+        continue $ client & cstate .~ TL & tweetBox . W.editContentsL %~ clearZipper
+
+      VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
+      VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
       AppEvent tw -> continue $ flip execState client $ do
         timeline %= W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
