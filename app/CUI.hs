@@ -17,12 +17,13 @@ import qualified Data.Text.IO as T
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Resource
 import Control.Monad.Reader (lift, ask, runReaderT)
+import Control.Monad.State
 import Control.Lens hiding (index)
 import Control.Concurrent (forkIO, Chan, newChan, writeChan)
 import qualified Data.Vector as V
 import qualified Data.Map as M
 import Data.Monoid
-import Data.Text.Zipper (insertChar, textZipper)
+import Data.Text.Zipper (clearZipper)
 
 data Timeline =
   TStatus Status
@@ -118,10 +119,12 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , vLimit 1 $ W.renderEditor False $ client^.minibuffer
       ]
     Anything ->
+      -- anythingの画面で選択アイテムが上下すると
+      -- 表示がおかしい？
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 8) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "brGreen" $ padRight Max $ txt " ---"
-      , vLimit 5 $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
+      , vLimit 5 $ padBottom Max $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
       , withAttr "brGreen" $ padRight Max $ txt " *anything*"
       , W.renderEditor True (client^.minibuffer)
       ]
@@ -144,7 +147,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> do
         let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ W.getEditContents $ client ^. tweetBox
         liftIO $ flip runReaderT ?config $ tweet text
-        continue $ client & cstate .~ TL
+        continue $ client & cstate .~ TL & tweetBox . W.editContentsL %~ clearZipper
 
       VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
@@ -163,8 +166,11 @@ app = App widgets showFirstCursor eventHandler return attrmap where
         let ws = T.words $ head $ W.getEditContents $ client'' ^. minibuffer
         continue $ client'' & anything . W.listElementsL .~ fmap snd (V.filter (\com -> all (\w -> w `T.isInfixOf` fst com) ws) commandList)
 
-      AppEvent tw ->
-        continue $ client & timeline %~ W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
+      AppEvent tw -> continue $ flip execState client $ do
+        timeline %= W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
+        let sel = client ^. timeline ^. W.listSelectedL
+        let elems = client ^. timeline ^. W.listElementsL
+        when (Just (V.length elems - 1) == sel) $ timeline %= W.listMoveDown
       _ -> continue client
 
 main = runAuth $ do
