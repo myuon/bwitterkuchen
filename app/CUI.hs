@@ -35,15 +35,6 @@ data Timeline =
 
 makePrisms ''Timeline
 
-getStatusReplies :: Status -> (StatusId -> IO Status) -> IO Timeline
-getStatusReplies status getter = TStatusReply status False <$> go status
-  where
-    go s = do
-      let mid = s ^. statusInReplyToStatusId
-      case mid of
-        Just i -> getter i >>= \s' -> (s':) <$> go s'
-        Nothing -> return []
-
 fetchTweetThread :: Chan Timeline -> AuthM ()
 fetchTweetThread channel = do
   config <- ask
@@ -57,7 +48,7 @@ fetchTweetThread channel = do
       case t of
         SStatus tw ->
           case tw ^. statusInReplyToStatusId of
-            Just sid -> lift $ writeChan channel =<< getStatusReplies tw (runAuth . callM . showId)
+            Just sid -> lift $ writeChan channel . TStatusReply tw False =<< runAuth (fetchThread tw)
             Nothing -> lift $ writeChan channel $ TStatus tw
         SRetweetedStatus tw -> lift $ writeChan channel $ TStatusRT tw
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
@@ -106,7 +97,7 @@ main = runAuth $ do
 
   size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
   me <- callM accountVerifyCredentials
-  xs <- fetch 10
+  xs <- fetchTimeline 10
 
   lift $ customMain
     (Vty.standardIOConfig >>= Vty.mkVty)

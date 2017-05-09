@@ -46,8 +46,11 @@ callM api = ask >>= \config -> lift $ call (twInfo config) (manager config) api
 streamM :: (MonadResource m, FromJSON res) => APIRequest api res -> AuthM (m (ResumableSource m res))
 streamM api = ask >>= \config -> return $ stream (twInfo config) (manager config) api
 
-fetch :: Integer -> AuthM [Status]
-fetch n = callM $ homeTimeline & count ?~ n
+fetchTimeline :: Integer -> AuthM [Status]
+fetchTimeline n = callM $ homeTimeline & count ?~ n
+
+fetchStatus :: StatusId -> AuthM Status
+fetchStatus = callM . showId
 
 favo :: StatusId -> AuthM Status
 favo st = callM $ favoritesCreate st
@@ -57,4 +60,11 @@ tweet txt = callM $ update $ T.pack txt
 
 replyTo :: StatusId -> String -> AuthM Status
 replyTo st txt = callM $ update (T.pack txt) & inReplyToStatusId ?~ st
+
+fetchThread :: Status -> AuthM [Status]
+fetchThread = go where
+  go st = do
+    (st:) <$> case st^.statusInReplyToStatusId of
+      Just k -> go =<< fetchStatus k
+      Nothing -> return []
 
