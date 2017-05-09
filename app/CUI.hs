@@ -55,28 +55,28 @@ fetchTweetThread channel = do
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
         _ -> return ()
 
-data TabName = HomeTab | NotificationTab
+data CState = TL | Tweet | Notification
   deriving (Eq, Ord, Show)
 
 data Client = Client {
   _screenSize :: (Int,Int),
   _tweetbox :: W.Editor T.Text String,
-  _currentTab :: TabName,
+  _cstate :: CState,
   _timeline :: W.List T.Text Timeline,
   _meUser :: User
   }
 
-
-makePrisms ''TabName
+makePrisms ''CState
 makeLenses ''Client
 
 defClient :: Client
 defClient = Client
   (0,0)
   (W.editorText "tweetbox" (vBox . fmap txt) (Just 5) "")
-  HomeTab
+  TL
   (W.list "tweetList" V.empty 2)
   (error "not initialized")
+
 
 app :: App Client Timeline T.Text
 app = App widgets showFirstCursor eventHandler return attrmap where
