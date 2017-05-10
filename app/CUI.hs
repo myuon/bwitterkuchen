@@ -144,7 +144,7 @@ runClient AFavo =
   use (timeline . listSelectedElemL) >>= \case
     Just st -> do
       lift $ liftIO $ flip runReaderT ?config $ favo $ st^.asStatus^.status_id
-      timeline . listSelectedElemL . _Just . _TStatus . statusFavorited .= Just True
+      timeline . listSelectedElemL . _Just . asStatus . statusFavorited .= Just True
     Nothing -> return ()
 runClient AUnfold =
   use (timeline . listSelectedElemL) >>= \case
