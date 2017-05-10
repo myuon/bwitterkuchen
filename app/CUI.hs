@@ -93,13 +93,51 @@ data Client = Client {
 makePrisms ''CState
 makeLenses ''Client
 
-commandList :: V.Vector (T.Text,T.Text)
-commandList = V.fromList
-  [ ("tweet", "tweet (C-t)")
-  , ("favo", "favo (C-f)")
-  , ("unfold", "unfold (C-u)")
-  , ("quit", "quit")
-  ]
+data Action =
+  -- user action
+  ATweet | AFavo | AUnfold | AQuit
+  -- other action
+  | ACloseAnything | ARunAnything
+  deriving (Eq, Ord)
+
+manual :: Action -> T.Text
+manual =
+  \case
+    ATweet -> "tweet (C-t)"
+    AFavo -> "fav (C-f)"
+    AUnfold -> "unfold (C-u)"
+    AQuit -> "quit (q)"
+
+functionList :: V.Vector Action
+functionList = V.fromList [ATweet, AFavo, AUnfold, AQuit]
+
+runClient :: (?config :: Config) => Action -> StateT Client (EventM n) ()
+runClient ATweet = do
+  text <- foldl1 (\x y -> x `T.append` "\n" `T.append` y) . W.getEditContents <$> use tweetBox
+  lift $ liftIO $ flip runReaderT ?config $ tweet text
+  tweetBox . W.editContentsL %= clearZipper
+runClient AFavo =
+  use (timeline . listSelectedElemL) >>= \case
+    Just (TStatus st) -> do
+      lift $ liftIO $ flip runReaderT ?config $ favo $ st^.status_id
+      timeline . listSelectedElemL . _Just . _TStatus . statusFavorited .= Just True
+    Nothing -> return ()
+runClient AUnfold =
+  use (timeline . listSelectedElemL) >>= \case
+    Just (TStatusReply st False []) -> do
+      th <- lift $ liftIO $ flip runReaderT ?config $ fetchThread st
+      timeline . listSelectedElemL . _Just .= TStatusReply st True th
+    Just (TStatusReply st b th) -> do
+      timeline . listSelectedElemL . _Just .= TStatusReply st (not b) th
+    Nothing -> return ()
+runClient ARunAnything = do
+  ws <- T.words . head . W.getEditContents <$> use minibuffer
+  anything . W.listElementsL .= V.filter (\com -> all (\w -> w `T.isInfixOf` com) ws) (fmap manual functionList)
+runClient ACloseAnything = do
+  cstate .= TL
+  minibuffer . W.editContentsL %= clearZipper
+  anything . W.listElementsL .= fmap manual functionList
+runClient _ = return ()
 
 defClient :: Client
 defClient = Client
@@ -107,7 +145,7 @@ defClient = Client
   TL
   (W.list "tweetList" V.empty 2)
   (W.editorText "minibuffer" (vBox . fmap txt) (Just 1) "")
-  (W.list "anything" (fmap snd commandList) 5)
+  (W.list "anything" (fmap manual functionList) 1)
   (W.editorText "tweetBox" (vBox . fmap txt) (Just 5) "")
   (error "not initialized")
 
@@ -176,7 +214,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
     TL ->
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline False $ client^.timeline
-      , withAttr "inverted" $ padRight Max $ txt " ---"
+      , withAttr "inverted" $ padRight Max $ txt " --- *timeline*"
       , W.renderEditor False $ client^.minibuffer
       ]
     Anything ->
@@ -184,8 +222,8 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       -- 表示がおかしい？
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 8) $ W.renderList renderTimeline False $ client^.timeline
-      , withAttr "brGreen" $ padRight Max $ txt " ---"
-      , vLimit 5 $ W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
+      , withAttr "brGreen" $ padRight Max $ txt " --- timeline"
+      , W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
       , withAttr "brGreen" $ padRight Max $ txt " *anything*"
       , W.renderEditor True (client^.minibuffer)
       ]
@@ -197,56 +235,30 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       ]
 
   eventHandler client = do
-    let runA m = liftIO $ runReaderT m ?config
-    let favoCommand = case W.listSelectedElement $ client ^. timeline of
-          Just (_, TStatus st) -> do
-            runA (favo $ st^.status_id)
-            continue $ client
-              & timeline . listSelectedElemL . _Just .~ (TStatus $ st & statusFavorited .~ Just True)
-          _ -> continue client
-    let unfoldCommand = case W.listSelectedElement $ client ^. timeline of
-          Just (_, TStatusReply st False []) -> do
-            thread <- runA $ fetchThread st
-            continue $ client & timeline . listSelectedElemL . _Just .~ TStatusReply st True thread
-          Just (_, TStatusReply st b th) ->
-            continue $ client & timeline . listSelectedElemL . _Just .~ TStatusReply st (not b) th
-          _ -> continue client
-    
     \case
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
       VtyEvent (Vty.EvKey (Vty.KChar 'x') modfs) | (Vty.MMeta `elem` modfs || Vty.MAlt `elem` modfs) && client^.cstate == TL -> continue $ client & cstate .~ Anything
-      VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> unfoldCommand
-      VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> favoCommand
+      VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> (flip execStateT client $ runClient AUnfold) >>= continue
+      VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> (flip execStateT client $ runClient AFavo) >>= continue
 
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
         -- ここの実装さすがにひどい                                     
         case W.listSelectedElement (client^.anything) of
-          Just (_,com) | "quit" `T.isPrefixOf` com -> halt client
-          Just (_,com) | "tweet" `T.isPrefixOf` com -> continue $ client & cstate .~ Tweet
-          Just (_,com) | "favo" `T.isPrefixOf` com ->
-            fmap (\x -> x & cstate .~ TL
-                          & minibuffer . W.editContentsL %~ clearZipper) <$> favoCommand
-          Just (_,com) | "unfold" `T.isPrefixOf` com ->
-            fmap (\x -> x & cstate .~ TL
-                          & minibuffer . W.editContentsL %~ clearZipper) <$> unfoldCommand
+          Just (n,com) -> case functionList V.! n of
+            AQuit -> halt client
+            ATweet -> continue $ client & cstate .~ Tweet
+            AFavo -> (flip execStateT client $ (runClient AFavo >> runClient ACloseAnything)) >>= continue
+            AUnfold -> (flip execStateT client $ (runClient AUnfold >> runClient ACloseAnything)) >>= continue
           _ -> continue client
       VtyEvent ev | client^.cstate == Anything -> do
         client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
         client'' <- handleEventLensed client' anything W.handleListEvent ev
-
-        -- anythingの実装
-        -- 効率ゥ！
-        let ws = T.words $ head $ W.getEditContents $ client'' ^. minibuffer
-        continue $ client'' & anything . W.listElementsL .~ fmap snd (V.filter (\com -> all (\w -> w `T.isInfixOf` fst com) ws) commandList)
-
+        continue =<< (flip execStateT client'' $ runClient ARunAnything)
       VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> do
-        let text = foldl1 (\x y -> x `T.append` "\n" `T.append` y) $ W.getEditContents $ client ^. tweetBox
-        liftIO $ flip runReaderT ?config $ tweet text
-        continue $ client & cstate .~ TL & tweetBox . W.editContentsL %~ clearZipper
+      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> (flip execStateT client $ runClient ATweet) >>= continue
 
       VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
       VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
