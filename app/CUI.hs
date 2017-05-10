@@ -218,8 +218,6 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , W.renderEditor False $ client^.minibuffer
       ]
     Anything ->
-      -- anythingの画面で選択アイテムが上下すると
-      -- 表示がおかしい？
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 8) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "brGreen" $ padRight Max $ txt " --- timeline"
@@ -234,17 +232,24 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , vLimit 5 $ W.renderEditor True $ client^.tweetBox
       ]
 
+  -- keybindは事前に指定したものを勝手にやってくれる感じにしたい
   eventHandler client = do
     \case
+      -- TL keybind
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
       VtyEvent (Vty.EvKey (Vty.KChar 'x') modfs) | (Vty.MMeta `elem` modfs || Vty.MAlt `elem` modfs) && client^.cstate == TL -> continue $ client & cstate .~ Anything
       VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> (flip execStateT client $ runClient AUnfold) >>= continue
       VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> (flip execStateT client $ runClient AFavo) >>= continue
 
+      -- Tweetbox keybind
+      VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
+      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
+      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> (flip execStateT client $ runClient ATweet) >>= continue
+
+      -- anything keybind
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
-        -- ここの実装さすがにひどい                                     
         case W.listSelectedElement (client^.anything) of
           Just (n,com) -> case functionList V.! n of
             AQuit -> halt client
@@ -256,10 +261,8 @@ app = App widgets showFirstCursor eventHandler return attrmap where
         client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
         client'' <- handleEventLensed client' anything W.handleListEvent ev
         continue =<< (flip execStateT client'' $ runClient ARunAnything)
-      VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> (flip execStateT client $ runClient ATweet) >>= continue
 
+      -- handling event
       VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
       VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
