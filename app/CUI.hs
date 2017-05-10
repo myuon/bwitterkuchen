@@ -142,6 +142,9 @@ runClient AReplyTweet = do
     Nothing -> return ()
 runClient AFavo =
   use (timeline . listSelectedElemL) >>= \case
+    Just st | st^.asStatus^.statusFavorited == Just True -> do
+      lift $ liftIO $ flip runReaderT ?config $ unfavo $ st^.asStatus^.status_id
+      timeline . listSelectedElemL . _Just . asStatus . statusFavorited .= Just False
     Just st -> do
       lift $ liftIO $ flip runReaderT ?config $ favo $ st^.asStatus^.status_id
       timeline . listSelectedElemL . _Just . asStatus . statusFavorited .= Just True
