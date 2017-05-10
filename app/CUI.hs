@@ -287,12 +287,13 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
         case W.listSelectedElement (client^.anything) of
-          Just (n,com) -> case functionList V.! n of
-            AQuit -> halt client
-            ATweet -> continue $ client & cstate .~ Tweet
-            AReplyTweet -> (flip execStateT client $ runClient AOpenReplyTweet) >>= continue
-            AFavo -> (flip execStateT client $ (runClient AFavo >> runClient ACloseAnything)) >>= continue
-            AUnfold -> (flip execStateT client $ (runClient AUnfold >> runClient ACloseAnything)) >>= continue
+          Just (n,com) -> case (functionList V.!) <$> V.elemIndex com (fmap manual functionList) of
+            Just AQuit -> halt client
+            Just ATweet -> continue $ client & cstate .~ Tweet
+            Just AReplyTweet -> (flip execStateT client $ runClient AOpenReplyTweet) >>= continue
+            Just AFavo -> (flip execStateT client $ (runClient AFavo >> runClient ACloseAnything)) >>= continue
+            Just AUnfold -> (flip execStateT client $ (runClient AUnfold >> runClient ACloseAnything)) >>= continue
+            _ -> continue client
           _ -> continue client
       VtyEvent ev | client^.cstate == Anything -> do
         client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
