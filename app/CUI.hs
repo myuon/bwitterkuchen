@@ -42,6 +42,7 @@ data Timeline =
     , unfolded :: Bool
     , thread :: [Status]
     }
+  | TFavorite User Status
   deriving (Eq, Show)
 
 makePrisms ''Timeline
@@ -85,7 +86,10 @@ fetchTweetThread channel = do
       \case
         SStatus tw -> lift $ writeChan channel $ fromStatus tw
         SRetweetedStatus tw -> lift $ writeChan channel $ TStatusRT tw
-        SEvent ev | ev ^. evEvent == "favorite" -> return ()
+        SEvent ev | ev ^. evEvent == "favorite" ->
+          case (ev^.evSource, ev^.evTargetObject) of
+            (ETUser u, Just (ETStatus s)) -> lift $ writeChan channel $ TFavorite u s
+            _ -> return ()
         _ -> return ()
 
 data CState = TL | Anything | Tweet | Reply | Notification deriving (Eq, Ord, Show)
@@ -94,6 +98,7 @@ data Client = Client {
   _screenSize :: (Int,Int),
   _cstate :: CState,
   _timeline :: W.List T.Text Timeline,
+  _notification :: W.List T.Text Timeline,
   _minibuffer :: W.Editor T.Text T.Text,
   _anything :: W.List T.Text T.Text,
   _tweetBox :: W.Editor T.Text T.Text,
@@ -108,7 +113,7 @@ data Action =
   ATweet | AReplyTweet | AFavo | AUnfold | AQuit
   -- other action
   | ACloseAnything | ARunAnything | AOpenReplyTweet
-  | ACloseTweet
+  | ACloseTweet | AMoveToTLTab | AMoveToNotificationTab
   deriving (Eq, Ord)
 
 manual :: Action -> T.Text
@@ -137,9 +142,12 @@ runClient AReplyTweet = do
     Nothing -> return ()
 runClient AFavo =
   use (timeline . listSelectedElemL) >>= \case
+    Just st | st^.asStatus^.statusFavorited == Just True -> do
+      lift $ liftIO $ flip runReaderT ?config $ unfavo $ st^.asStatus^.status_id
+      timeline . listSelectedElemL . _Just . asStatus . statusFavorited .= Just False
     Just st -> do
       lift $ liftIO $ flip runReaderT ?config $ favo $ st^.asStatus^.status_id
-      timeline . listSelectedElemL . _Just . _TStatus . statusFavorited .= Just True
+      timeline . listSelectedElemL . _Just . asStatus . statusFavorited .= Just True
     Nothing -> return ()
 runClient AUnfold =
   use (timeline . listSelectedElemL) >>= \case
@@ -148,7 +156,7 @@ runClient AUnfold =
       timeline . listSelectedElemL . _Just .= TStatusReply st True th
     Just (TStatusReply st b th) -> do
       timeline . listSelectedElemL . _Just .= TStatusReply st (not b) th
-    Nothing -> return ()
+    _ -> return ()
 runClient ARunAnything = do
   ws <- T.words . head . W.getEditContents <$> use minibuffer
   anything . W.listElementsL .= V.filter (\com -> all (\w -> w `T.isInfixOf` com) ws) (fmap manual functionList)
@@ -165,13 +173,16 @@ runClient AOpenReplyTweet = do
       cstate .= Reply
       tweetBox . W.editContentsL .= textZipper ["@" `T.append` (st^.asStatus^.user^.screen_name) `T.append` " "] Nothing
     Nothing -> return ()
+runClient AMoveToTLTab = cstate .= TL
+runClient AMoveToNotificationTab = cstate .= Notification
 runClient _ = return ()
 
 defClient :: Client
 defClient = Client
   (0,0)
   TL
-  (W.list "tweetList" V.empty 2)
+  (W.list "timeline" V.empty 2)
+  (W.list "notification" V.empty 2)
   (W.editorText "minibuffer" (vBox . fmap txt) (Just 1) "")
   (W.list "anything" (fmap manual functionList) 1)
   (W.editorText "tweetBox" (vBox . fmap txt) (Just 5) "")
@@ -186,6 +197,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
     attrMap (fg Vty.white)
     [ ("user-name", Vty.withStyle mempty Vty.bold)
     , ("screen-name", fg Vty.red)
+    , ("screen-name-favo", fg Vty.blue)
     , (W.listSelectedFocusedAttr, Vty.black `on` Vty.white)
     , (W.listSelectedAttr, Vty.black `on` Vty.white)
     , ("inverted", Vty.black `on` Vty.white)
@@ -237,6 +249,16 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              ]
         <=>
         hBox [ txt $ tw^.rsRetweetedStatus^.text ]
+      TFavorite usr tw -> padRight Max $
+        hBox [ txt "★ "
+             , withAttr "user-name" $ txt $ usr^.name
+             , withAttr "screen-name-favo" $
+               hBox [ txt " @"
+                    , txt $ usr^.screen_name ]
+             ]
+        <=>
+        hBox [ txt "| "
+             , txt $ tw^.text ]
 
   widgets client = case client^.cstate of
     TL ->
@@ -265,17 +287,27 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , withAttr "inverted" $ padRight Max $ txt " *reply* (C-c)send (C-q)cancel"
       , vLimit 5 $ W.renderEditor True $ client^.tweetBox
       ]
+    Notification ->
+      return $ vBox
+      [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline True $ client^.notification
+      , withAttr "inverted" $ padRight Max $ txt " --- *notification*"
+      , W.renderEditor False $ client^.minibuffer
+      ]
 
   -- keybindは事前に指定したものを勝手にやってくれる感じにしたい
   eventHandler client = do
     \case
       -- TL keybind
-      VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
+      VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL || client^.cstate == Notification -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MMeta]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AOpenReplyTweet)
       VtyEvent (Vty.EvKey (Vty.KChar 'x') [Vty.MMeta]) | client^.cstate == TL -> continue $ client & cstate .~ Anything
       VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AUnfold)
       VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AFavo)
+      VtyEvent (Vty.EvKey (Vty.KChar 'n') [Vty.MCtrl]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AMoveToNotificationTab)
+
+      -- Notification tab
+      VtyEvent (Vty.EvKey (Vty.KChar 'n') [Vty.MCtrl]) | client^.cstate == Notification -> continue =<< (flip execStateT client $ runClient AMoveToTLTab)
 
       -- Tweetbox keybind
       VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet || client^.cstate == Reply -> continue =<< (flip execStateT client $ runClient ACloseTweet)
@@ -287,12 +319,13 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
       VtyEvent (Vty.EvKey (Vty.KEnter) []) | client^.cstate == Anything ->
         case W.listSelectedElement (client^.anything) of
-          Just (n,com) -> case functionList V.! n of
-            AQuit -> halt client
-            ATweet -> continue $ client & cstate .~ Tweet
-            AReplyTweet -> (flip execStateT client $ runClient AOpenReplyTweet) >>= continue
-            AFavo -> (flip execStateT client $ (runClient AFavo >> runClient ACloseAnything)) >>= continue
-            AUnfold -> (flip execStateT client $ (runClient AUnfold >> runClient ACloseAnything)) >>= continue
+          Just (n,com) -> case (functionList V.!) <$> V.elemIndex com (fmap manual functionList) of
+            Just AQuit -> halt client
+            Just ATweet -> continue $ client & cstate .~ Tweet
+            Just AReplyTweet -> (flip execStateT client $ runClient AOpenReplyTweet) >>= continue
+            Just AFavo -> (flip execStateT client $ (runClient AFavo >> runClient ACloseAnything)) >>= continue
+            Just AUnfold -> (flip execStateT client $ (runClient AUnfold >> runClient ACloseAnything)) >>= continue
+            _ -> continue client
           _ -> continue client
       VtyEvent ev | client^.cstate == Anything -> do
         client' <- handleEventLensed client minibuffer W.handleEditorEvent ev
@@ -301,13 +334,20 @@ app = App widgets showFirstCursor eventHandler return attrmap where
 
       -- handling event
       VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
+      VtyEvent ev | client^.cstate == Notification -> continue =<< handleEventLensed client notification W.handleListEvent ev
       VtyEvent ev | client^.cstate == Tweet || client^.cstate == Reply -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
       AppEvent tw -> continue $ flip execState client $ do
-        timeline %= W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
-        let sel = client ^. timeline ^. W.listSelectedL
-        let elems = client ^. timeline ^. W.listElementsL
-        when (Just (V.length elems - 1) == sel) $ timeline %= W.listMoveDown
+        case tw of
+          (TFavorite _ _) -> do
+            notification %= W.listInsert (V.length $ client ^. notification ^. W.listElementsL) tw
+          _ -> do
+            timeline %= W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
+            when (tw ^. asStatus ^. statusInReplyToUserId == Just (client ^. meUser ^. user_id)) $ notification %= W.listInsert (V.length $ client ^. notification ^. W.listElementsL) tw
+            
+            let sel = client ^. timeline ^. W.listSelectedL
+            let elems = client ^. timeline ^. W.listElementsL
+            when (Just (V.length elems - 1) == sel) $ timeline %= W.listMoveDown
       _ -> continue client
 
 main = runAuth $ do

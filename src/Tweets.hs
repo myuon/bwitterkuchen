@@ -60,6 +60,9 @@ fetchStatus = callM . showId
 favo :: StatusId -> AuthM Status
 favo st = callM $ favoritesCreate st
 
+unfavo :: StatusId -> AuthM Status
+unfavo st = callM $ favoritesDestroy st
+
 tweet :: T.Text -> AuthM Status
 tweet = callM . update
 
