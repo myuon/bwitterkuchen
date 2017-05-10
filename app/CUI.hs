@@ -148,7 +148,7 @@ runClient AUnfold =
       timeline . listSelectedElemL . _Just .= TStatusReply st True th
     Just (TStatusReply st b th) -> do
       timeline . listSelectedElemL . _Just .= TStatusReply st (not b) th
-    Nothing -> return ()
+    _ -> return ()
 runClient ARunAnything = do
   ws <- T.words . head . W.getEditContents <$> use minibuffer
   anything . W.listElementsL .= V.filter (\com -> all (\w -> w `T.isInfixOf` com) ws) (fmap manual functionList)
