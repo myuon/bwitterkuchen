@@ -24,7 +24,7 @@ import Control.Concurrent (forkIO, Chan, newChan, writeChan)
 import qualified Data.Vector as V
 import qualified Data.Map as M
 import Data.Monoid
-import Data.Text.Zipper (clearZipper)
+import Data.Text.Zipper (textZipper, clearZipper)
 
 listSelectedElemL :: Lens' (W.List n e) (Maybe e)
 listSelectedElemL =
@@ -45,6 +45,16 @@ data Timeline =
   deriving (Eq, Show)
 
 makePrisms ''Timeline
+
+asStatus :: Lens' Timeline Status
+asStatus = lens getter setter where
+  getter (TStatus st) = st
+  getter (TStatusRT st) = st^.rsRetweetedStatus
+  getter (TStatusReply st _ _) = st
+
+  setter (TStatus _) st = TStatus st
+  setter (TStatusRT rs) st = TStatusRT $ rs & rsRetweetedStatus .~ st
+  setter (TStatusReply _ b t) st = TStatusReply st b t
 
 fromStatus :: Status -> Timeline
 fromStatus st
@@ -78,7 +88,7 @@ fetchTweetThread channel = do
         SEvent ev | ev ^. evEvent == "favorite" -> return ()
         _ -> return ()
 
-data CState = TL | Anything | Tweet | Notification deriving (Eq, Ord, Show)
+data CState = TL | Anything | Tweet | Reply | Notification deriving (Eq, Ord, Show)
 
 data Client = Client {
   _screenSize :: (Int,Int),
@@ -95,31 +105,40 @@ makeLenses ''Client
 
 data Action =
   -- user action
-  ATweet | AFavo | AUnfold | AQuit
+  ATweet | AReplyTweet | AFavo | AUnfold | AQuit
   -- other action
-  | ACloseAnything | ARunAnything
+  | ACloseAnything | ARunAnything | AOpenReplyTweet
+  | ACloseTweet
   deriving (Eq, Ord)
 
 manual :: Action -> T.Text
 manual =
   \case
     ATweet -> "tweet (C-t)"
+    AReplyTweet -> "reply (M-t)"
     AFavo -> "fav (C-f)"
     AUnfold -> "unfold (C-u)"
     AQuit -> "quit (q)"
 
 functionList :: V.Vector Action
-functionList = V.fromList [ATweet, AFavo, AUnfold, AQuit]
+functionList = V.fromList [ATweet, AReplyTweet, AFavo, AUnfold, AQuit]
 
 runClient :: (?config :: Config) => Action -> StateT Client (EventM n) ()
 runClient ATweet = do
   text <- foldl1 (\x y -> x `T.append` "\n" `T.append` y) . W.getEditContents <$> use tweetBox
   lift $ liftIO $ flip runReaderT ?config $ tweet text
   tweetBox . W.editContentsL %= clearZipper
+runClient AReplyTweet = do
+  use (timeline . listSelectedElemL) >>= \case
+    Just st -> do
+      text <- foldl1 (\x y -> x `T.append` "\n" `T.append` y) . W.getEditContents <$> use tweetBox
+      lift $ liftIO $ flip runReaderT ?config $ replyTo (st^.asStatus^.status_id) text
+      tweetBox . W.editContentsL %= clearZipper
+    Nothing -> return ()
 runClient AFavo =
   use (timeline . listSelectedElemL) >>= \case
-    Just (TStatus st) -> do
-      lift $ liftIO $ flip runReaderT ?config $ favo $ st^.status_id
+    Just st -> do
+      lift $ liftIO $ flip runReaderT ?config $ favo $ st^.asStatus^.status_id
       timeline . listSelectedElemL . _Just . _TStatus . statusFavorited .= Just True
     Nothing -> return ()
 runClient AUnfold =
@@ -137,6 +156,15 @@ runClient ACloseAnything = do
   cstate .= TL
   minibuffer . W.editContentsL %= clearZipper
   anything . W.listElementsL .= fmap manual functionList
+runClient ACloseTweet = do
+  cstate .= TL
+  tweetBox . W.editContentsL %= clearZipper
+runClient AOpenReplyTweet = do
+  use (timeline . listSelectedElemL) >>= \case
+    Just st -> do
+      cstate .= Reply
+      tweetBox . W.editContentsL .= textZipper ["@" `T.append` (st^.asStatus^.user^.screen_name) `T.append` " "] Nothing
+    Nothing -> return ()
 runClient _ = return ()
 
 defClient :: Client
@@ -231,6 +259,12 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , withAttr "inverted" $ padRight Max $ txt " *tweet* (C-c)send (C-q)cancel"
       , vLimit 5 $ W.renderEditor True $ client^.tweetBox
       ]
+    Reply ->
+      return $ vBox
+      [ vLimit (client^.screenSize^._2 - 6) $ W.renderList renderTimeline False $ client^.timeline
+      , withAttr "inverted" $ padRight Max $ txt " *reply* (C-c)send (C-q)cancel"
+      , vLimit 5 $ W.renderEditor True $ client^.tweetBox
+      ]
 
   -- keybindは事前に指定したものを勝手にやってくれる感じにしたい
   eventHandler client = do
@@ -238,14 +272,16 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       -- TL keybind
       VtyEvent (Vty.EvKey (Vty.KChar 'q') []) | client^.cstate == TL -> halt client
       VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MCtrl]) | client^.cstate == TL -> continue $ client & cstate .~ Tweet
-      VtyEvent (Vty.EvKey (Vty.KChar 'x') modfs) | (Vty.MMeta `elem` modfs || Vty.MAlt `elem` modfs) && client^.cstate == TL -> continue $ client & cstate .~ Anything
-      VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> (flip execStateT client $ runClient AUnfold) >>= continue
-      VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> (flip execStateT client $ runClient AFavo) >>= continue
+      VtyEvent (Vty.EvKey (Vty.KChar 't') [Vty.MMeta]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AOpenReplyTweet)
+      VtyEvent (Vty.EvKey (Vty.KChar 'x') [Vty.MMeta]) | client^.cstate == TL -> continue $ client & cstate .~ Anything
+      VtyEvent (Vty.EvKey (Vty.KChar 'u') [Vty.MCtrl]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AUnfold)
+      VtyEvent (Vty.EvKey (Vty.KChar 'f') [Vty.MCtrl]) | client^.cstate == TL -> continue =<< (flip execStateT client $ runClient AFavo)
 
       -- Tweetbox keybind
-      VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet -> continue $ client & cstate .~ TL
-      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> (flip execStateT client $ runClient ATweet) >>= continue
+      VtyEvent (Vty.EvKey (Vty.KChar 'q') [Vty.MCtrl]) | client^.cstate == Tweet || client^.cstate == Reply -> continue =<< (flip execStateT client $ runClient ACloseTweet)
+      VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Tweet || client^.cstate == Reply -> continue =<< (flip execStateT client $ runClient ACloseTweet)
+      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Tweet -> (flip execStateT client $ runClient ATweet >> runClient ACloseTweet) >>= continue
+      VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) | client^.cstate == Reply -> (flip execStateT client $ runClient AReplyTweet >> runClient ACloseTweet) >>= continue
 
       -- anything keybind
       VtyEvent (Vty.EvKey (Vty.KChar 'g') [Vty.MCtrl]) | client^.cstate == Anything -> continue $ client & cstate .~ TL
@@ -254,6 +290,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
           Just (n,com) -> case functionList V.! n of
             AQuit -> halt client
             ATweet -> continue $ client & cstate .~ Tweet
+            AReplyTweet -> (flip execStateT client $ runClient AOpenReplyTweet) >>= continue
             AFavo -> (flip execStateT client $ (runClient AFavo >> runClient ACloseAnything)) >>= continue
             AUnfold -> (flip execStateT client $ (runClient AUnfold >> runClient ACloseAnything)) >>= continue
           _ -> continue client
@@ -264,7 +301,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
 
       -- handling event
       VtyEvent ev | client^.cstate == TL -> continue =<< handleEventLensed client timeline W.handleListEvent ev
-      VtyEvent ev | client^.cstate == Tweet -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
+      VtyEvent ev | client^.cstate == Tweet || client^.cstate == Reply -> continue =<< handleEventLensed client tweetBox W.handleEditorEvent ev
 
       AppEvent tw -> continue $ flip execState client $ do
         timeline %= W.listInsert (V.length $ client ^. timeline ^. W.listElementsL) tw
