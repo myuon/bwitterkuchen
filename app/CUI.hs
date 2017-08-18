@@ -215,7 +215,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
              ]
         <=>
-        hBox [ txt $ tw^.text ]
+        hBox [ txtWrap $ tw^.text ]
       TStatusReply tw unfolded threads -> padRight Max $
         hBox [ txt "! "
              , withAttr "user-name" $ txt $ tw^.user^.name
@@ -226,7 +226,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
              ]
         <=>
-        hBox [ txt $ tw^.text ]
+        hBox [ txtWrap $ tw^.text ]
         <=>
         if unfolded
         then hBox [ txt "┗"
@@ -248,7 +248,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              , if (tw^.rsRetweetedStatus^.statusRetweeted == Just True) then txt " 🔃" else txt ""
              ]
         <=>
-        hBox [ txt $ tw^.rsRetweetedStatus^.text ]
+        hBox [ txtWrap $ tw^.rsRetweetedStatus^.text ]
       TFavorite usr tw -> padRight Max $
         hBox [ txt "★ "
              , withAttr "user-name" $ txt $ usr^.name
@@ -258,7 +258,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              ]
         <=>
         hBox [ txt "| "
-             , txt $ tw^.text ]
+             , txtWrap $ tw^.text ]
 
   widgets client = case client^.cstate of
     TL ->
