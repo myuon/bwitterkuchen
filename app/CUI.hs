@@ -4,6 +4,7 @@ module CUI where
 
 import Tweets
 import Brick
+import Brick.BChan
 import qualified Brick.Widgets.Edit as W
 import qualified Brick.Widgets.List as W
 import qualified Graphics.Vty as Vty
@@ -20,11 +21,12 @@ import Control.Monad.Trans.Resource
 import Control.Monad.Reader (lift, ask, runReaderT)
 import Control.Monad.State
 import Control.Lens hiding (index)
-import Control.Concurrent (forkIO, Chan, newChan, writeChan)
+import Control.Concurrent (forkIO)
 import qualified Data.Vector as V
 import qualified Data.Map as M
 import Data.Monoid
 import Data.Text.Zipper (textZipper, clearZipper)
+import qualified Text.Wrap as Wrap
 
 listSelectedElemL :: Lens' (W.List n e) (Maybe e)
 listSelectedElemL =
@@ -74,7 +76,7 @@ fromStatus st
     TStatusReply st False []
   | otherwise = TStatus st
               
-fetchTweetThread :: Chan Timeline -> AuthM ()
+fetchTweetThread :: BChan Timeline -> AuthM ()
 fetchTweetThread channel = do
   runResourceT $ do
     src <- streamM userstream
@@ -84,11 +86,11 @@ fetchTweetThread channel = do
     getStream :: StreamingAPI -> AuthM ()
     getStream =
       \case
-        SStatus tw -> lift $ writeChan channel $ fromStatus tw
-        SRetweetedStatus tw -> lift $ writeChan channel $ TStatusRT tw
+        SStatus tw -> lift $ writeBChan channel $ fromStatus tw
+        SRetweetedStatus tw -> lift $ writeBChan channel $ TStatusRT tw
         SEvent ev | ev ^. evEvent == "favorite" ->
           case (ev^.evSource, ev^.evTargetObject) of
-            (ETUser u, Just (ETStatus s)) -> lift $ writeChan channel $ TFavorite u s
+            (ETUser u, Just (ETStatus s)) -> lift $ writeBChan channel $ TFavorite u s
             _ -> return ()
         _ -> return ()
 
@@ -183,9 +185,9 @@ defClient = Client
   TL
   (W.list "timeline" V.empty 2)
   (W.list "notification" V.empty 2)
-  (W.editorText "minibuffer" (vBox . fmap txt) (Just 1) "")
+  (W.editorText "minibuffer" (Just 1) "")
   (W.list "anything" (fmap manual functionList) 1)
-  (W.editorText "tweetBox" (vBox . fmap txt) (Just 5) "")
+  (W.editorText "tweetBox" (Just 5) "")
   (error "not initialized")
 
 
@@ -215,7 +217,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
              ]
         <=>
-        hBox [ txtWrap $ tw^.text ]
+        hBox [ txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.text ]
       TStatusReply tw unfolded threads -> padRight Max $
         hBox [ txt "! "
              , withAttr "user-name" $ txt $ tw^.user^.name
@@ -226,7 +228,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
              ]
         <=>
-        hBox [ txtWrap $ tw^.text ]
+        hBox [ txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.text ]
         <=>
         if unfolded
         then hBox [ txt "┗"
@@ -248,7 +250,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              , if (tw^.rsRetweetedStatus^.statusRetweeted == Just True) then txt " 🔃" else txt ""
              ]
         <=>
-        hBox [ txtWrap $ tw^.rsRetweetedStatus^.text ]
+        hBox [ txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.rsRetweetedStatus^.text ]
       TFavorite usr tw -> padRight Max $
         hBox [ txt "★ "
              , withAttr "user-name" $ txt $ usr^.name
@@ -258,14 +260,14 @@ app = App widgets showFirstCursor eventHandler return attrmap where
              ]
         <=>
         hBox [ txt "| "
-             , txtWrap $ tw^.text ]
+             , txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.text ]
 
   widgets client = case client^.cstate of
     TL ->
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "inverted" $ padRight Max $ txt " --- *timeline*"
-      , W.renderEditor False $ client^.minibuffer
+      , W.renderEditor (vBox . fmap txt) False $ client^.minibuffer
       ]
     Anything ->
       return $ vBox
@@ -273,25 +275,25 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , withAttr "brGreen" $ padRight Max $ txt " --- timeline"
       , W.renderList (\_ e -> padRight Max $ padLeft (Pad 1) $ txt e) True $ client^.anything
       , withAttr "brGreen" $ padRight Max $ txt " *anything*"
-      , W.renderEditor True (client^.minibuffer)
+      , W.renderEditor (vBox . fmap txt) True (client^.minibuffer)
       ]
     Tweet ->
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 6) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "inverted" $ padRight Max $ txt " *tweet* (C-c)send (C-q)cancel"
-      , vLimit 5 $ W.renderEditor True $ client^.tweetBox
+      , vLimit 5 $ W.renderEditor (vBox . fmap txt) True $ client^.tweetBox
       ]
     Reply ->
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 6) $ W.renderList renderTimeline False $ client^.timeline
       , withAttr "inverted" $ padRight Max $ txt " *reply* (C-c)send (C-q)cancel"
-      , vLimit 5 $ W.renderEditor True $ client^.tweetBox
+      , vLimit 5 $ W.renderEditor (vBox . fmap txt) True $ client^.tweetBox
       ]
     Notification ->
       return $ vBox
       [ vLimit (client^.screenSize^._2 - 2) $ W.renderList renderTimeline True $ client^.notification
       , withAttr "inverted" $ padRight Max $ txt " --- *notification*"
-      , W.renderEditor False $ client^.minibuffer
+      , W.renderEditor (vBox . fmap txt) False $ client^.minibuffer
       ]
 
   -- keybindは事前に指定したものを勝手にやってくれる感じにしたい
@@ -351,7 +353,7 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       _ -> continue client
 
 main = runAuth $ do
-  channel <- lift newChan
+  channel <- lift $ newBChan 2
   lift . forkIO =<< forkAuth (fetchTweetThread channel)
 
   size <- lift $ Vty.displayBounds =<< Vty.outputForConfig =<< Vty.standardIOConfig
