@@ -1,10 +1,8 @@
 flags: {}
 extra-package-dbs: []
 packages:
-- '.'
+- .
 extra-deps:
-- brick-0.14
-- text-zipper-0.9
-- twitter-conduit-0.2.2
-- vty-5.12
-resolver: lts-8.13
+- brick-0.23
+- word-wrap-0.4.1
+resolver: lts-9.1
