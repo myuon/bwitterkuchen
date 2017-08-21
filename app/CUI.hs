@@ -26,7 +26,6 @@ import qualified Data.Vector as V
 import qualified Data.Map as M
 import Data.Monoid
 import Data.Text.Zipper (textZipper, clearZipper)
-import qualified Text.Wrap as Wrap
 
 listSelectedElemL :: Lens' (W.List n e) (Maybe e)
 listSelectedElemL =
@@ -190,6 +189,13 @@ defClient = Client
   (W.editorText "tweetBox" (Just 5) "")
   (error "not initialized")
 
+txtWrapper :: Int -> T.Text -> Widget n
+txtWrapper w tx = vBox $ fmap txt $ reverse $ T.foldl go [] tx where
+  go :: [T.Text] -> Char -> [T.Text]
+  go [] ch = [T.singleton ch]
+  go (x:xs) ch
+    | textWidth (T.snoc x ch) >= w = T.singleton ch:x:xs
+    | otherwise = T.snoc x ch:xs
 
 -- 結局IO絡みになりそう
 -- EventMがMonadIOだがReaderT経由で呼べないのでおそらくImplicitでもらうしかない
@@ -206,62 +212,6 @@ app = App widgets showFirstCursor eventHandler return attrmap where
     , ("brGreen", Vty.black `on` Vty.brightGreen)
     ]
   
-  renderTimeline b =
-    \case
-      TStatus tw -> padRight Max $
-        hBox [ withAttr "user-name" $ txt $ tw^.user^.name
-             , withAttr "screen-name" $
-               hBox [ txt " @"
-                    , txt $ tw^.user^.screen_name ]
-             , if (tw^.statusFavorited == Just True) then txt " ★" else txt ""
-             , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
-             ]
-        <=>
-        hBox [ txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.text ]
-      TStatusReply tw unfolded threads -> padRight Max $
-        hBox [ txt "! "
-             , withAttr "user-name" $ txt $ tw^.user^.name
-             , withAttr "screen-name" $
-               hBox [ txt " @"
-                    , txt $ tw^.user^.screen_name ]
-             , if (tw^.statusFavorited == Just True) then txt " ★" else txt ""
-             , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
-             ]
-        <=>
-        hBox [ txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.text ]
-        <=>
-        if unfolded
-        then hBox [ txt "┗"
-                  , padLeft (Pad 2) $ vBox $ fmap (renderTimeline b . TStatus) $ tail threads
-                  ]
-        else hBox []
-      TStatusRT tw -> padRight Max $
-        hBox [ withAttr "user-name" $ txt $ tw^.rsRetweetedStatus^.user^.name
-             , withAttr "screen-name" $
-               hBox [ txt " @"
-                    , txt $ tw^.rsRetweetedStatus^.user^.screen_name ]
-             , txt " [RT by "
-             , txt $ tw^.user^.name
-             , withAttr "screen-name" $
-               hBox [ txt " @"
-                    , txt $ tw^.user^.screen_name ]
-             , txt "]"
-             , if (tw^.rsRetweetedStatus^.statusFavorited == Just True) then txt " ★" else txt ""
-             , if (tw^.rsRetweetedStatus^.statusRetweeted == Just True) then txt " 🔃" else txt ""
-             ]
-        <=>
-        hBox [ txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.rsRetweetedStatus^.text ]
-      TFavorite usr tw -> padRight Max $
-        hBox [ txt "★ "
-             , withAttr "user-name" $ txt $ usr^.name
-             , withAttr "screen-name-favo" $
-               hBox [ txt " @"
-                    , txt $ usr^.screen_name ]
-             ]
-        <=>
-        hBox [ txt "| "
-             , txtWrapWith (Wrap.defaultWrapSettings { Wrap.breakLongWords = True }) $ tw^.text ]
-
   widgets client = case client^.cstate of
     TL ->
       return $ vBox
@@ -295,7 +245,63 @@ app = App widgets showFirstCursor eventHandler return attrmap where
       , withAttr "inverted" $ padRight Max $ txt " --- *notification*"
       , W.renderEditor (vBox . fmap txt) False $ client^.minibuffer
       ]
-
+    where
+      renderTimeline b =
+        \case
+          TStatus tw -> padRight Max $
+            hBox [ withAttr "user-name" $ txt $ tw^.user^.name
+                 , withAttr "screen-name" $
+                   hBox [ txt " @"
+                        , txt $ tw^.user^.screen_name ]
+                 , if (tw^.statusFavorited == Just True) then txt " ★" else txt ""
+                 , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
+                 ]
+            <=>
+            hBox [ txtWrapper (client ^. screenSize ^. _1) $ tw^.text ]
+          TStatusReply tw unfolded threads -> padRight Max $
+            hBox [ txt "! "
+                 , withAttr "user-name" $ txt $ tw^.user^.name
+                 , withAttr "screen-name" $
+                   hBox [ txt " @"
+                        , txt $ tw^.user^.screen_name ]
+                 , if (tw^.statusFavorited == Just True) then txt " ★" else txt ""
+                 , if (tw^.statusRetweeted == Just True) then txt " 🔃" else txt ""
+                 ]
+            <=>
+            hBox [ txtWrapper (client ^. screenSize ^. _1) $ tw^.text ]
+            <=>
+            if unfolded
+            then hBox [ txt "┗"
+                      , padLeft (Pad 2) $ vBox $ fmap (renderTimeline b . TStatus) $ tail threads
+                      ]
+            else hBox []
+          TStatusRT tw -> padRight Max $
+            hBox [ withAttr "user-name" $ txt $ tw^.rsRetweetedStatus^.user^.name
+                 , withAttr "screen-name" $
+                   hBox [ txt " @"
+                        , txt $ tw^.rsRetweetedStatus^.user^.screen_name ]
+                 , txt " [RT by "
+                 , txt $ tw^.user^.name
+                 , withAttr "screen-name" $
+                   hBox [ txt " @"
+                        , txt $ tw^.user^.screen_name ]
+                 , txt "]"
+                 , if (tw^.rsRetweetedStatus^.statusFavorited == Just True) then txt " ★" else txt ""
+                 , if (tw^.rsRetweetedStatus^.statusRetweeted == Just True) then txt " 🔃" else txt ""
+                 ]
+            <=>
+            hBox [ txtWrapper (client ^. screenSize ^. _1) $ tw^.rsRetweetedStatus^.text ]
+          TFavorite usr tw -> padRight Max $
+            hBox [ txt "★ "
+                 , withAttr "user-name" $ txt $ usr^.name
+                 , withAttr "screen-name-favo" $
+                   hBox [ txt " @"
+                        , txt $ usr^.screen_name ]
+                 ]
+            <=>
+            hBox [ txt "| "
+                 , txtWrapper (client ^. screenSize ^. _1) $ tw^.text ]
+      
   -- keybindは事前に指定したものを勝手にやってくれる感じにしたい
   eventHandler client = do
     \case
